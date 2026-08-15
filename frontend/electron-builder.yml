@@ -1,0 +1,19 @@
+appId: com.paicc.app
+productName: PAICC
+directories:
+  buildResources: build
+  output: release
+files:
+  - out/**/*
+  - "!**/.vscode/*"
+  - "!src/*"
+asarUnpack:
+  - resources/**
+win:
+  target:
+    - nsis
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true

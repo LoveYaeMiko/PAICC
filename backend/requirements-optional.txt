@@ -1,0 +1,10 @@
+# Optional integrations — install only what you need.
+# chroma + sentence-transformers for the deep-research knowledge base
+chromadb>=0.5.0
+sentence-transformers>=3.0.0
+# GPU metrics (NVIDIA)
+GPUtil>=1.4.0
+# Windows-only integrations (system WMI queries, shortcut/icon handling)
+WMI>=1.5.1; platform_system == "Windows"
+pywin32>=306; platform_system == "Windows"
+pylnk3>=0.4.2

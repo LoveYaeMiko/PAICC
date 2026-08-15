@@ -1,0 +1,15 @@
+# Core runtime dependencies (lightweight, installed by default)
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.7.0
+psutil>=5.9.8
+PyYAML>=6.0.1
+watchdog>=4.0.0
+APScheduler>=3.10.4
+httpx>=0.27.0
+python-dotenv>=1.0.1
+python-multipart>=0.0.9
+
+# NOTE: heavy/optional integrations are in requirements-optional.txt
+# (Chroma + sentence-transformers + GPU/WMI/pywin32 + pylnk3). They are imported
+# lazily so the core backend runs without them.
