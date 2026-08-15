@@ -382,8 +382,10 @@ def _normalize_level(level: Any) -> str:
 def _overall(levels: list[str]) -> str:
     if any(level == "critical" for level in levels):
         return "critical"
-    if any(level in ("warning", "unknown") for level in levels):
+    if any(level == "warning" for level in levels):
         return "warning"
+    if any(level == "unknown" for level in levels):
+        return "unknown"
     return "ok"
 
 
@@ -708,7 +710,7 @@ def _status_poll_loop() -> None:
             criticals = {rl["name"] for rl in red_lines if rl.get("level") == "critical"}
             new_criticals = criticals - _last_criticals
 
-            if overall != _last_overall:
+            if overall != _last_overall and overall != "unknown":
                 publish(
                     "red_line_alert",
                     {"title": f"红线状态变化: {overall}", "message": _summarize(status)},

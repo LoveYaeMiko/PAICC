@@ -14,8 +14,11 @@ import os
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+
 # backend/ root
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
 DATA_DIR = Path(os.getenv("PAICC_DATA_DIR", str(BASE_DIR / "data")))
 LOGS_DIR = Path(os.getenv("PAICC_LOGS_DIR", str(BASE_DIR / "logs")))
 CHROMA_DIR = Path(os.getenv("PAICC_CHROMA_DIR", str(DATA_DIR / "chroma")))
@@ -46,6 +49,7 @@ DEFAULTS: dict[str, Any] = {
     # Misc
     "backend_port": "8000",
     "everything_path": "es.exe",
+    "claude_path": "",
     "default_user": "local",
 }
 

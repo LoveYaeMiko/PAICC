@@ -34,8 +34,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         content: data.content,
         tool_calls: data.tool_calls,
       }
+      // On a needs_confirmation response the assistant "content" is just a placeholder
+      // ("该操作需要确认"). Drop it so an approval re-sends the original request rather
+      // than that placeholder text.
       set({
-        messages: [...history, assistant],
+        messages: data.needs_confirmation ? history : [...history, assistant],
         sending: false,
         pendingConfirmation: data.needs_confirmation ? data.confirmation : null,
         lastToolCalls: data.tool_calls ?? [],
@@ -53,8 +56,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!conf) return
     await api.post(`/confirmations/${conf.confirmation_id}/approve`)
     set({ pendingConfirmation: null })
-    const last = get().messages[get().messages.length - 1]
-    await get().send(last?.content ?? '', conf.confirmation_id)
+
+    // Re-send the original history (which now ends at the user request, since the
+    // placeholder assistant message was dropped) with the confirmation id.
+    const history = get().messages
+    set({ sending: true })
+    try {
+      const { data } = await api.post('/ai/chat', {
+        messages: history.map((m) => ({ role: m.role, content: m.content })),
+        use_tools: true,
+        confirmation_id: conf.confirmation_id,
+      })
+      const assistant: ChatMessage = {
+        role: 'assistant',
+        content: data.content,
+        tool_calls: data.tool_calls,
+      }
+      set({
+        messages: [...history, assistant],
+        sending: false,
+        pendingConfirmation: data.needs_confirmation ? data.confirmation : null,
+        lastToolCalls: data.tool_calls ?? [],
+      })
+    } catch {
+      set({ sending: false })
+    }
   },
 
   denyConfirmation: async () => {

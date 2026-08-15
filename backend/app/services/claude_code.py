@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 import threading
@@ -27,6 +28,24 @@ proc: subprocess.Popen[str] | None = None
 available: bool = bool(shutil.which("claude"))
 #: Whether a session is currently running.
 running: bool = False
+
+
+def _resolve_claude() -> str | None:
+    """Resolve the ``claude`` CLI path from config, falling back to PATH lookup."""
+    configured = str(settings.get("claude_path", "") or "").strip()
+    if configured and (os.path.isfile(configured) or shutil.which(configured)):
+        return configured
+    return shutil.which("claude")
+
+
+def _claude_command() -> list[str]:
+    """Build the spawn argv, routing ``.cmd``/``.bat`` through ``cmd /c`` on Windows."""
+    path = _resolve_claude() or "claude"
+    args = [path, "--output-format", "stream-json"]
+    if os.name == "nt" and path.lower().endswith((".cmd", ".bat")):
+        return ["cmd", "/c", *args]
+    return args
+
 
 #: Guards access to :data:`proc` / :data:`running`.
 _lock = threading.Lock()
@@ -114,7 +133,7 @@ def start() -> None:
     global _started, available
     if _started:
         return
-    available = bool(shutil.which("claude"))
+    available = _resolve_claude() is not None
     _started = True
 
 
@@ -131,7 +150,7 @@ def start_session() -> dict[str, Any]:
         cwd = _cwd()
         try:
             proc = subprocess.Popen(
-                ["claude", "--output-format", "stream-json"],
+                _claude_command(),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

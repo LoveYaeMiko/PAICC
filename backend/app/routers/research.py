@@ -51,6 +51,6 @@ def delete_document(doc_id: int) -> dict[str, Any]:
 
 
 @router.post("/report")
-def generate_report(req: ReportRequest) -> dict[str, Any]:
+async def generate_report(req: ReportRequest) -> dict[str, Any]:
     """Generate a Markdown research report from local and (optionally) web sources."""
-    return knowledge_base.generate_report(req.topic, req.use_web)
+    return await knowledge_base.generate_report(req.topic, req.use_web)

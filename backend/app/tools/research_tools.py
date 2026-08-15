@@ -69,6 +69,6 @@ def list_documents() -> dict[str, Any]:
     },
     category="research",
 )
-def generate_research_report(topic: str) -> dict[str, Any]:
+async def generate_research_report(topic: str) -> dict[str, Any]:
     """Generate a research report."""
-    return knowledge_base.generate_report(topic, use_web=True)
+    return await knowledge_base.generate_report(topic, use_web=True)

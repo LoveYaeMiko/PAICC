@@ -165,7 +165,15 @@ export default function FilesPage(): JSX.Element {
           ...(sizeMin ? { size_min: sizeMin } : {}),
         },
       })
-      setSearchResults(res.data as FileSearchResult[])
+      const data = res.data as { ok?: boolean; results?: FileSearchResult[]; error?: string }
+      if (data && Array.isArray(data.results)) {
+        setSearchResults(data.results)
+      } else if (data && data.error) {
+        setSearchResults([])
+        notification.error({ message: '文件搜索失败', description: data.error })
+      } else {
+        setSearchResults([])
+      }
     } catch (e) {
       notification.error({ message: '文件搜索失败', description: errMsg(e) })
     } finally {
@@ -181,7 +189,15 @@ export default function FilesPage(): JSX.Element {
     setContentLoading(true)
     try {
       const res = await api.get<unknown>('/files/content-search', { params: { query: q } })
-      setContentHits(res.data as ContentHit[])
+      const data = res.data as { ok?: boolean; results?: ContentHit[]; error?: string }
+      if (data && Array.isArray(data.results)) {
+        setContentHits(data.results)
+      } else if (data && data.error) {
+        setContentHits([])
+        notification.error({ message: '内容搜索失败', description: data.error })
+      } else {
+        setContentHits([])
+      }
     } catch (e) {
       notification.error({ message: '内容搜索失败', description: errMsg(e) })
     } finally {

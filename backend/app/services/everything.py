@@ -13,6 +13,24 @@ from typing import Any
 
 from app.config import settings
 
+#: Semantic file-type names -> Everything ``ext:`` filter groups.
+_TYPE_EXTS: dict[str, str] = {
+    "image": "jpg;jpeg;png;gif;bmp;webp;svg;ico;tif;tiff",
+    "video": "mp4;mkv;avi;mov;wmv;flv;webm;m4v",
+    "audio": "mp3;wav;flac;aac;ogg;m4a;wma",
+    "document": "pdf;doc;docx;xls;xlsx;ppt;pptx;txt;md;csv;json;rtf;odt",
+    "archive": "zip;rar;7z;tar;gz;bz2;xz;iso",
+    "executable": "exe;msi;bat;cmd;com;dll",
+}
+
+
+def _type_filter(type_: str) -> str:
+    """Map a semantic type name to an Everything ``ext:`` filter (raw ext passes through)."""
+    key = (type_ or "").strip().lower()
+    if key in _TYPE_EXTS:
+        return f"ext:{_TYPE_EXTS[key]}"
+    return f"ext:{type_}"
+
 
 def search(
     query: str,
@@ -38,11 +56,11 @@ def search(
 
     args: list[str] = [exe, "-n", str(int(limit) if limit else 50), str(query)]
     if type:
-        args.append(f"ext:{type}")
+        args.append(_type_filter(type))
     if size_min is not None:
-        args.append(f"size:>{int(size_min)}")
+        args.append(f"size:>{int(size_min)}mb")
     if size_max is not None:
-        args.append(f"size:<{int(size_max)}")
+        args.append(f"size:<{int(size_max)}mb")
 
     try:
         proc = subprocess.run(

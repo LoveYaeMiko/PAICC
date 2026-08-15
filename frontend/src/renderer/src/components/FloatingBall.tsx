@@ -53,6 +53,14 @@ export default function FloatingBall(): JSX.Element {
       .catch(() => setFavorites([]))
   }, [])
 
+  // Alt+Space global shortcut toggles the quick-input panel.
+  useEffect(() => {
+    window.paicc?.onToggleInput(() => {
+      setMenuOpen(false)
+      setInputOpen((v) => !v)
+    })
+  }, [])
+
   const onBallEnter = (): void => {
     hoverTimer.current = window.setTimeout(() => setMenuOpen(true), 500)
   }

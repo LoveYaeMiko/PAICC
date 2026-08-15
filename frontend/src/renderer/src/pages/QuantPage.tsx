@@ -32,12 +32,14 @@ const LEVEL_COLOR: Record<RedLineLevel, string> = {
   ok: '#52c41a',
   warning: '#faad14',
   critical: '#ff4d4f',
+  unknown: '#8a93a6',
 }
 
 const LEVEL_LABEL: Record<RedLineLevel, string> = {
   ok: '正常',
   warning: '警告',
   critical: '严重',
+  unknown: '未知',
 }
 
 function describeError(err: unknown): string {
@@ -87,7 +89,7 @@ function RedLineCard({ redLine }: { redLine: RedLine }): JSX.Element {
     <Card size="small" style={{ borderTop: `3px solid ${color}`, height: '100%' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <Typography.Text strong ellipsis style={{ maxWidth: 160 }}>
-          {redLine.name}
+          {redLine.label ?? redLine.name}
         </Typography.Text>
         <Tag color={color} style={{ marginInlineEnd: 0 }}>
           {LEVEL_LABEL[redLine.level] ?? redLine.level}
@@ -255,7 +257,15 @@ export default function QuantPage(): JSX.Element {
   }, [refreshStatus])
 
   const onLogLine = useCallback((data: unknown) => {
-    const line = typeof data === 'string' ? data : JSON.stringify(data)
+    let line: string
+    if (typeof data === 'string') {
+      line = data
+    } else if (data && typeof data === 'object') {
+      const obj = data as Record<string, unknown>
+      line = String(obj.line ?? obj.message ?? obj.text ?? '')
+    } else {
+      line = String(data)
+    }
     setLogs((prev) => [...prev, line])
   }, [])
 

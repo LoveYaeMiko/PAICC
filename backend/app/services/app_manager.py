@@ -321,52 +321,39 @@ def uninstall_app(app_id: int, confirmation_id: str | None = None) -> dict[str, 
 # --------------------------------------------------------------------------- #
 # Icons
 # --------------------------------------------------------------------------- #
-def _png_chunk(chunk_type: bytes, data: bytes) -> bytes:
-    import struct
-    import zlib
-
-    chunk = struct.pack(">I", len(data)) + chunk_type + data
-    chunk += struct.pack(">I", zlib.crc32(chunk_type + data) & 0xFFFFFFFF)
-    return chunk
-
-
-def _write_png(bits: bytes, width: int, height: int, bpp: int, out_path: Path) -> None:
-    """Encode a bottom-up DIB byte buffer as an 8-bit RGB PNG (stdlib only)."""
-    import struct
-    import zlib
-
-    bytes_per_pixel = max(1, bpp // 8)
-    row_stride = (width * bytes_per_pixel + 3) & ~3
-    raw = bytearray()
-    for y in range(height - 1, -1, -1):
-        row = bits[y * row_stride : y * row_stride + width * bytes_per_pixel]
-        raw.append(0)  # filter type 0 (None)
-        for x in range(width):
-            off = x * bytes_per_pixel
-            b, g, r = row[off], row[off + 1], row[off + 2]
-            raw += bytes((r, g, b))
-    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)  # 8-bit truecolor
-    png = b"\x89PNG\r\n\x1a\n"
-    png += _png_chunk(b"IHDR", ihdr)
-    png += _png_chunk(b"IDAT", zlib.compress(bytes(raw), 6))
-    png += _png_chunk(b"IEND", b"")
-    out_path.write_bytes(png)
+def _extract_icon_powershell(path: str, out_path: Path) -> bool:
+    """Render the associated icon to ``out_path`` as PNG via System.Drawing."""
+    ps_path = path.replace("'", "''")
+    ps_out = str(out_path).replace("'", "''")
+    script = (
+        "Add-Type -AssemblyName System.Drawing;"
+        f"$i=[System.Drawing.Icon]::ExtractAssociatedIcon('{ps_path}');"
+        "if($null -eq $i){exit 1};"
+        "$b=$i.ToBitmap();"
+        f"$b.Save('{ps_out}',[System.Drawing.Imaging.ImageFormat]::Png);"
+        "$b.Dispose();$i.Dispose()"
+    )
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True,
+            timeout=20,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0 and out_path.exists() and out_path.stat().st_size > 0
 
 
 def extract_icon(path: str, app_id: int) -> str | None:
-    """Extract a 32x32 icon from ``path`` and cache it as ``data/icons/<id>.png``.
+    """Extract the associated icon from ``path`` and cache it as ``data/icons/<id>.png``.
 
-    Requires pywin32 (``win32ui``/``win32con``/``win32gui``); returns the icon
-    path on success and ``None`` on any failure. The ``apps.icon_path`` column is
-    updated so the icon is served on subsequent ``GET /apps/icon/{id}`` calls.
+    Uses ``System.Drawing`` (via PowerShell) on Windows, which reliably renders
+    the associated icon to a 32-bit PNG. Returns the icon path on success and
+    ``None`` on any failure. The ``apps.icon_path`` column is updated so the icon
+    is served on subsequent ``GET /apps/icon/{id}`` calls.
     """
-    try:
-        import win32con
-        import win32gui
-        import win32ui
-    except ImportError:
+    if os.name != "nt":
         return None
-
     if not path or not os.path.exists(path):
         return None
 
@@ -377,43 +364,8 @@ def extract_icon(path: str, app_id: int) -> str | None:
         return None
     out_path = icon_dir / f"{app_id}.png"
 
-    hicon = None
-    screen_dc = None
-    try:
-        try:
-            large, _small = win32gui.ExtractIconEx(path, 0, 1, 1)
-            if not large:
-                return None
-            hicon = large[0]
-        except Exception:
-            return None
-
-        screen_dc = win32gui.GetDC(0)
-        compat_dc = win32gui.CreateCompatibleDC(screen_dc)
-        mem_dc = win32ui.CreateDCFromHandle(compat_dc)
-        bmp = win32ui.CreateBitmap()
-        bmp.CreateCompatibleBitmap(mem_dc, 32, 32)
-        mem_dc.SelectObject(bmp)
-        mem_dc.FillSolidRect((0, 0, 32, 32), 0x00FFFFFF)  # white background
-        win32gui.DrawIconEx(
-            mem_dc.GetSafeHdc(), 0, 0, hicon, 32, 32, 0, None, win32con.DI_NORMAL
-        )
-        width, height, _planes, bpp = bmp.GetInfo()
-        bits = bmp.GetBitmapBits()
-        _write_png(bits, int(width), int(height), int(bpp), out_path)
-
-        db.execute("UPDATE apps SET icon_path = ? WHERE id = ?", (str(out_path), app_id))
-        return str(out_path)
-    except Exception:
+    if not _extract_icon_powershell(path, out_path):
         return None
-    finally:
-        if hicon is not None:
-            try:
-                win32gui.DestroyIcon(hicon)
-            except Exception:
-                pass
-        if screen_dc is not None:
-            try:
-                win32gui.ReleaseDC(0, screen_dc)
-            except Exception:
-                pass
+
+    db.execute("UPDATE apps SET icon_path = ? WHERE id = ?", (str(out_path), app_id))
+    return str(out_path)

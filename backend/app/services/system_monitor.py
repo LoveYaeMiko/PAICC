@@ -14,6 +14,7 @@ import asyncio
 import logging
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -128,7 +129,62 @@ def get_system_stats() -> dict[str, Any]:
 
 
 def _gpu_stats() -> list[dict[str, Any]]:
-    """Read GPU metrics via GPUtil if available, else ``[]``."""
+    """Read GPU metrics via ``nvidia-smi``, falling back to GPUtil, else ``[]``."""
+    result = _gpu_stats_nvidia_smi()
+    if result:
+        return result
+    return _gpu_stats_gputil()
+
+
+def _to_float(value: str) -> float | None:
+    """Parse a numeric token, tolerating ``[N/A]`` / empty strings."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _gpu_stats_nvidia_smi() -> list[dict[str, Any]]:
+    """Query GPU metrics with ``nvidia-smi`` (no third-party dependencies)."""
+    exe = shutil.which("nvidia-smi")
+    if not exe:
+        return []
+    try:
+        proc = subprocess.run(
+            [
+                exe,
+                "--query-gpu=name,temperature.gpu,utilization.gpu,memory.used,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if proc.returncode != 0:
+        return []
+
+    result: list[dict[str, Any]] = []
+    for line in proc.stdout.splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 5:
+            continue
+        name, temp, util, mem_used, mem_total = parts[:5]
+        result.append(
+            {
+                "name": name,
+                "load": _to_float(util) or 0.0,
+                "temperature": _to_float(temp),
+                "memory_used": int(_to_float(mem_used) or 0.0),
+                "memory_total": int(_to_float(mem_total) or 0.0),
+            }
+        )
+    return result
+
+
+def _gpu_stats_gputil() -> list[dict[str, Any]]:
+    """Legacy fallback via GPUtil (broken on Python >= 3.12 without distutils)."""
     try:
         import GPUtil  # lazy optional dependency
     except ImportError:
@@ -179,7 +235,7 @@ def get_processes(sort_by: str = "cpu") -> list[dict[str, Any]]:
                 "memory_rss": mem_info.rss if mem_info else 0,
                 "create_time": round(info.get("create_time") or 0.0, 1),
                 "exe": info.get("exe"),
-                "cmdline": info.get("cmdline"),
+                "cmdline": " ".join(info.get("cmdline") or []) or "",
                 "status": info.get("status"),
             }
         )

@@ -127,10 +127,11 @@ export interface QuantCommand {
   description: string
 }
 
-export type RedLineLevel = 'ok' | 'warning' | 'critical'
+export type RedLineLevel = 'ok' | 'warning' | 'critical' | 'unknown'
 
 export interface RedLine {
   name: string
+  label?: string
   level: RedLineLevel
   value: number | null
   threshold: number | null

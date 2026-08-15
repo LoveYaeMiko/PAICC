@@ -134,10 +134,11 @@ export default function ResearchPage(): JSX.Element {
     setSearching(true)
     setSearched(true)
     try {
-      const { data } = await api.get<SearchResult[]>('/research/search', {
+      const { data } = await api.get<unknown>('/research/search', {
         params: { query: q, top_k: topK },
       })
-      setResults(Array.isArray(data) ? data : [])
+      const list = (data as { results?: SearchResult[] } | null)?.results
+      setResults(Array.isArray(list) ? list : [])
     } catch (err) {
       notification.error({ message: '检索失败', description: describeError(err) })
       setResults([])

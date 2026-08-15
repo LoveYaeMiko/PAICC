@@ -197,7 +197,10 @@ def ingest(source: str) -> dict[str, Any]:
     if os.path.isfile(source):
         file_path = str(Path(source).resolve())
         title = os.path.splitext(os.path.basename(source))[0] or "Untitled"
-        text = _read_file_text(file_path)
+        try:
+            text = _read_file_text(file_path)
+        except Exception as exc:  # noqa: BLE001 — e.g. pypdf not installed
+            return {"ok": False, "error": f"failed to read document: {exc}"}
         is_file = True
     else:
         text = source
@@ -407,10 +410,10 @@ def web_search(query: str) -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 # Report generation
 # --------------------------------------------------------------------------- #
-def _synthesize_report(topic: str, context: str) -> str:
-    """Ask the LLM to synthesise a report, or return ``None`` if unavailable."""
+async def _synthesize_report(topic: str, context: str) -> str:
+    """Ask the LLM to synthesise a report, or fall back to assembly if unavailable."""
     try:
-        from app.services.llm_client import LLMClient  # may not exist yet
+        from app.services.llm_client import LLMClient
 
         client = LLMClient()
         prompt = (
@@ -418,12 +421,11 @@ def _synthesize_report(topic: str, context: str) -> str:
             f"Markdown 研究报告。报告需包含：概述、关键发现、详细分析、结论与建议。"
             f"若参考资料不足，请明确说明。\n\n参考资料：\n{context}"
         )
-        reply = client.chat(prompt)
-        if isinstance(reply, dict):
-            reply = reply.get("content") or reply.get("result") or reply.get("text") or ""
-        reply = str(reply).strip()
-        if reply:
-            return reply
+        reply = await client.chat([{"role": "user", "content": prompt}])
+        content = reply.get("content") if isinstance(reply, dict) else None
+        content = str(content or "").strip()
+        if content:
+            return content
     except Exception as exc:  # noqa: BLE001
         logger.warning("LLM report synthesis unavailable: %s", exc)
     return _fallback_report(topic, context)
@@ -447,7 +449,7 @@ def _fallback_report(topic: str, context: str) -> str:
     return "\n".join(lines)
 
 
-def generate_report(topic: str, use_web: bool = True) -> dict[str, Any]:
+async def generate_report(topic: str, use_web: bool = True) -> dict[str, Any]:
     """Generate a Markdown research report from local (+ optional web) sources."""
     topic = (topic or "").strip()
     if not topic:
@@ -466,7 +468,7 @@ def generate_report(topic: str, use_web: bool = True) -> dict[str, Any]:
         sources.append({"title": w.get("title", ""), "url": w.get("url", "")})
 
     context = "\n".join(snippets) if snippets else "(no sources found)"
-    content = _synthesize_report(topic, context)
+    content = await _synthesize_report(topic, context)
 
     db.log_operation(
         "research_generate_report",

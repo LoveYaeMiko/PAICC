@@ -117,16 +117,16 @@ export default function SettingsPage(): JSX.Element {
         <Form form={form} layout="vertical">
           <SectionTitle>LLM</SectionTitle>
           <FieldGrid>
-            <Form.Item name="provider" label="Provider">
+            <Form.Item name="llm_provider" label="Provider">
               <Select options={PROVIDER_OPTIONS} />
             </Form.Item>
-            <Form.Item name="model" label="模型">
+            <Form.Item name="llm_model" label="模型">
               <Input placeholder="例如 deepseek-chat" />
             </Form.Item>
-            <Form.Item name="base_url" label="Base URL">
+            <Form.Item name="llm_base_url" label="Base URL">
               <Input placeholder="https://api.deepseek.com" />
             </Form.Item>
-            <Form.Item name="api_key" label="API Key">
+            <Form.Item name="llm_api_key" label="API Key">
               <Input.Password placeholder="sk-..." />
             </Form.Item>
           </FieldGrid>
@@ -146,8 +146,15 @@ export default function SettingsPage(): JSX.Element {
 
           <SectionTitle>文件</SectionTitle>
           <FieldGrid>
-            <Form.Item name="everything_path" label="Everything 路径">
-              <Input placeholder="Everything.exe 路径" />
+            <Form.Item name="everything_path" label="Everything (es.exe) 路径">
+              <Input placeholder="例如 C:\Program Files\Everything\es.exe" />
+            </Form.Item>
+          </FieldGrid>
+
+          <SectionTitle>Claude CLI</SectionTitle>
+          <FieldGrid>
+            <Form.Item name="claude_path" label="Claude CLI 路径">
+              <Input placeholder="留空则从 PATH 查找，例如 ...\AppData\Roaming\npm\claude.cmd" />
             </Form.Item>
           </FieldGrid>
 
