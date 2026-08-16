@@ -22,7 +22,7 @@ _PARAMS: dict[str, Any] = {
     name="claude_run_task",
     description="Start (if needed) a local Claude Code session and send it a task to execute.",
     parameters=_PARAMS,
-    require_confirmation=True,
+    require_confirmation=False,
     category="claude",
 )
 def claude_run_task(

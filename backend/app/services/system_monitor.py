@@ -54,6 +54,10 @@ _POWER_PLAN_GUIDS: dict[str, str] = {
 _GUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 _NAME_RE = re.compile(r"\(([^)]*)\)")
 
+#: Cache of the last ``powercfg /list`` result.
+_power_plan_cache: dict[str, Any] = {"ts": 0.0, "plans": []}
+_POWER_PLAN_CACHE_TTL = 8.0
+
 
 def get_system_stats() -> dict[str, Any]:
     """Return a snapshot of CPU, memory, disk, network, GPU and uptime.
@@ -375,17 +379,23 @@ def reveal_process(pid: int) -> dict[str, Any]:
 def list_power_plans() -> list[dict[str, Any]]:
     """List Windows power plans (GUID + display name + active flag).
 
-    Returns ``[]`` on non-Windows or if ``powercfg`` is unavailable.
+    Returns ``[]`` on non-Windows or if ``powercfg`` is unavailable. Results are cached
+    for a few seconds because ``powercfg /list`` is a subprocess that can be slow on a
+    busy system, and the plan list rarely changes between UI polls.
     """
     if os.name != "nt":
         return []
+
+    now = time.time()
+    if now - _power_plan_cache["ts"] < _POWER_PLAN_CACHE_TTL:
+        return list(_power_plan_cache["plans"])
 
     try:
         proc = subprocess.run(
             ["powercfg", "/list"],
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=8,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return []
@@ -404,6 +414,8 @@ def list_power_plans() -> list[dict[str, Any]]:
         active = line.rstrip().endswith("*")
         plans.append({"name": name, "guid": guid, "active": active})
 
+    _power_plan_cache["ts"] = time.time()
+    _power_plan_cache["plans"] = list(plans)
     return plans
 
 

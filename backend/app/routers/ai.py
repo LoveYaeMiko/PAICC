@@ -30,7 +30,12 @@ _SYSTEM_PROMPT_BASE = (
     "the system (deleting files, cleaning, uninstalling, killing processes, running "
     "unknown scripts, changing settings, executing quant commands) requires explicit "
     "user approval and must go through the confirmation flow. When a tool asks for "
-    "confirmation, stop and report it to the user instead of proceeding."
+    "confirmation, stop and report it to the user instead of proceeding.\n"
+    "Knowledge base: a local RAG knowledge base of professional software-engineering "
+    "references is available. When answering software-engineering questions (coding "
+    "standards, design patterns, testing, git, architecture, security, performance, "
+    "databases, concurrency, CI/CD, code review), use the search_knowledge_base tool "
+    "first and ground your answer in the retrieved material."
 )
 
 

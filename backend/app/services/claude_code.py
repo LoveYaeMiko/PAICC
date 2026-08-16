@@ -142,6 +142,14 @@ def _claude_command() -> list[str]:
         "--input-format", "stream-json",
         "--verbose",
     ]
+    # Respect the user's Claude Code config (e.g. acceptEdits) by default; only add
+    # these flags when an explicit override is configured in Settings.
+    permission_mode = str(settings.get("claude_permission_mode", "") or "").strip()
+    if permission_mode:
+        args += ["--permission-mode", permission_mode]
+    model = str(settings.get("claude_model", "") or "").strip()
+    if model:
+        args += ["--model", model]
     context = _build_context()
     if context:
         args += ["--append-system-prompt", context]
@@ -493,6 +501,11 @@ def start_session() -> dict[str, Any]:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                # The CLI emits UTF-8; the default text-mode encoding on Chinese
+                # Windows is GBK, which crashes the reader thread on the first
+                # multi-byte UTF-8 sequence and silently kills the whole session.
+                encoding="utf-8",
+                errors="replace",
                 cwd=cwd,
                 bufsize=1,
             )

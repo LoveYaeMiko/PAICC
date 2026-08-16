@@ -13,6 +13,7 @@ import {
 } from '@ant-design/icons'
 import { useCallback, useEffect, useRef, useState, type DragEvent, type MouseEvent as ReactMouseEvent } from 'react'
 import { api, BACKEND_URL } from '@/services/api'
+import Markdown from '@/components/Markdown'
 import type { AppEntry } from '@/types'
 
 function AppIcon({ app, size }: { app: AppEntry; size: number }): JSX.Element {
@@ -293,7 +294,7 @@ export default function FloatingBall(): JSX.Element {
             <div className="ball-answer" style={{ left: 20, top: 12 }}>
               {history.map((m, i) => (
                 <div key={i} className={m.role === 'user' ? 'ball-msg-user' : 'ball-msg-assistant'}>
-                  {m.content}
+                  {m.role === 'assistant' ? <Markdown text={m.content} /> : m.content}
                 </div>
               ))}
               {loading && <div className="ball-msg-assistant ball-msg-thinking">思考中…</div>}

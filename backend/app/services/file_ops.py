@@ -12,11 +12,17 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 from typing import Any, Iterator
 
 from app.services import task_manager
 
 logger = logging.getLogger(__name__)
+
+#: Upper bound on the number of files sized while measuring a cleanable directory.
+#: Browser/thumbnail caches can hold hundreds of thousands of files; capping the walk
+#: keeps ``list_cleanable`` fast and stable (sizes are best-effort anyway).
+_MAX_SIZE_FILES = 120_000
 
 _HASH_READ_BYTES = 1024 * 1024  # hash the first 1 MB (plus size) for duplicate grouping
 
@@ -167,8 +173,23 @@ def _cleanable_id(path: str) -> str:
     return hashlib.sha1(path.encode("utf-8", "ignore")).hexdigest()[:16]
 
 
+#: Cache of the last computed cleanable list, so repeated UI/AI polling doesn't
+#: re-walk huge cache trees on every request.
+_cleanable_cache: dict[str, Any] = {"ts": 0.0, "items": []}
+_CLEANABLE_CACHE_TTL = 30.0
+
+
 def _cleanable_targets() -> list[dict[str, Any]]:
-    """Return the canonical list of cleanable locations (shared by list/clean)."""
+    """Return the canonical list of cleanable locations (shared by list/clean).
+
+    Results are cached for :data:`_CLEANABLE_CACHE_TTL` seconds: measuring a browser
+    cache directory is an expensive recursive walk, and the list/size rarely changes
+    within a single request burst.
+    """
+    now = time.time()
+    if now - _cleanable_cache["ts"] < _CLEANABLE_CACHE_TTL:
+        return list(_cleanable_cache["items"])
+
     home = os.path.expanduser("~")
     local = os.environ.get("LOCALAPPDATA", os.path.join(home, "AppData", "Local"))
     system_root = os.environ.get("SystemRoot", r"C:\Windows")
@@ -200,6 +221,8 @@ def _cleanable_targets() -> list[dict[str, Any]]:
             }
         )
     items.sort(key=lambda x: x["size"], reverse=True)
+    _cleanable_cache["ts"] = time.time()
+    _cleanable_cache["items"] = list(items)
     return items
 
 
@@ -234,20 +257,30 @@ def clean_items(item_ids: list[str]) -> dict[str, Any]:
         except OSError as exc:
             errors.append({"id": iid, "path": path, "error": str(exc)})
 
+    # Sizes changed — force the next list_cleanable to re-measure.
+    _cleanable_cache["ts"] = 0.0
     return {"removed": removed, "freed": freed, "errors": errors}
 
 
 def folder_size(directory: str) -> int:
-    """Recursively sum file sizes (skips symlinks and permission errors)."""
+    """Recursively sum file sizes (skips symlinks and permission errors).
+
+    Capped at :data:`_MAX_SIZE_FILES` files so an enormous cache tree can't make the
+    request hang; the returned value is an under-estimate in that (rare) case.
+    """
     total = 0
+    count = 0
     try:
         for dirpath, dirnames, filenames in os.walk(directory):
             for fn in filenames:
+                if count >= _MAX_SIZE_FILES:
+                    return total
                 fp = os.path.join(dirpath, fn)
                 try:
                     if os.path.islink(fp):
                         continue
                     total += os.path.getsize(fp)
+                    count += 1
                 except OSError:
                     continue
     except OSError:

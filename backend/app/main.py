@@ -41,6 +41,7 @@ BACKGROUND_SERVICES = [
     ("app.services.quant_manager", "start"),
     ("app.services.storage_analysis", "start_scheduler"),
     ("app.services.claude_code", "start"),
+    ("app.services.se_knowledge", "seed"),
 ]
 
 

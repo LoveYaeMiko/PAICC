@@ -200,6 +200,29 @@ export default function SettingsPage(): JSX.Element {
             <Form.Item name="claude_path" label="Claude CLI 路径">
               <Input placeholder="留空则从 PATH 查找，例如 ...\AppData\Roaming\npm\claude.cmd" />
             </Form.Item>
+            <Form.Item
+              name="claude_permission_mode"
+              label="权限模式"
+              extra="留空则沿用 Claude Code 自身配置（如 acceptEdits）"
+            >
+              <Select
+                allowClear
+                placeholder="留空 = 沿用 Claude Code 配置"
+                options={[
+                  { value: 'acceptEdits', label: 'acceptEdits（自动接受编辑）' },
+                  { value: 'plan', label: 'plan（仅计划，不改文件）' },
+                  { value: 'default', label: 'default（默认）' },
+                  { value: 'bypassPermissions', label: 'bypassPermissions（跳过所有权限）' },
+                ]}
+              />
+            </Form.Item>
+            <Form.Item
+              name="claude_model"
+              label="模型"
+              extra="留空则沿用 Claude Code 默认模型"
+            >
+              <Input placeholder="例如 claude-opus-5 / claude-sonnet-5" />
+            </Form.Item>
           </FieldGrid>
 
           <SectionTitle>邮件</SectionTitle>

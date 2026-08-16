@@ -2,6 +2,7 @@ import { ClearOutlined, SendOutlined } from '@ant-design/icons'
 import { Button, Empty, Input, Space, Spin, Tag } from 'antd'
 import { useEffect, useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom'
+import Markdown from '@/components/Markdown'
 import { useChatStore } from '@/store/useChatStore'
 import type { ChatMessage } from '@/types'
 
@@ -51,13 +52,13 @@ export default function ChatPage(): JSX.Element {
               background: isUser ? '#4a90e2' : '#171a21',
               color: isUser ? '#ffffff' : '#e6e9ef',
               border: isUser ? 'none' : '1px solid #262b36',
-              whiteSpace: 'pre-wrap',
+              whiteSpace: isUser ? 'pre-wrap' : undefined,
               wordBreak: 'break-word',
               fontSize: 14,
               lineHeight: 1.6,
             }}
           >
-            {msg.content}
+            {isUser ? msg.content : <Markdown text={msg.content} />}
           </div>
           {msg.tool_calls && msg.tool_calls.length > 0 && (
             <div

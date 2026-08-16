@@ -58,10 +58,13 @@ def init() -> dict[str, Any] | None:
 
         embedding_fn = _make_embedding_function()
         client = chromadb.PersistentClient(path=str(config.CHROMA_DIR))
+        # Collection names must be >= 3 chars ([a-zA-Z0-9._-]); the old 2-char "kb"
+        # name fails validation on current Chroma versions and silently disabled the
+        # vector store, forcing the keyword fallback.
         if embedding_fn is not None:
-            collection = client.get_or_create_collection("kb", embedding_function=embedding_fn)
+            collection = client.get_or_create_collection("paicc_kb", embedding_function=embedding_fn)
         else:
-            collection = client.get_or_create_collection("kb")
+            collection = client.get_or_create_collection("paicc_kb")
         _store = {"client": client, "collection": collection}
         logger.info("knowledge base initialised with Chroma at %s", config.CHROMA_DIR)
     except Exception as exc:  # noqa: BLE001

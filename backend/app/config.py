@@ -59,6 +59,9 @@ DEFAULTS: dict[str, Any] = {
     "backend_port": "8000",
     "everything_path": "es.exe",
     "claude_path": "",
+    # Claude Code CLI (empty = inherit the user's own Claude Code config)
+    "claude_permission_mode": "",
+    "claude_model": "",
     "default_user": "local",
 }
 
