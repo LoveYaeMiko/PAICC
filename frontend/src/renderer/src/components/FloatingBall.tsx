@@ -10,7 +10,7 @@ import {
   SendOutlined,
   SettingOutlined,
 } from '@ant-design/icons'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type DragEvent, type MouseEvent as ReactMouseEvent } from 'react'
 import { api, BACKEND_URL } from '@/services/api'
 import type { AppEntry } from '@/types'
 
@@ -63,14 +63,29 @@ export default function FloatingBall(): JSX.Element {
   const [answer, setAnswer] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [favorites, setFavorites] = useState<AppEntry[]>([])
+  const [dragging, setDragging] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
   const hoverTimer = useRef<number | null>(null)
+  const dragResetTimer = useRef<number | null>(null)
+  const noticeTimer = useRef<number | null>(null)
+  const didDrag = useRef(false)
 
-  useEffect(() => {
+  const showNotice = useCallback((msg: string): void => {
+    setNotice(msg)
+    if (noticeTimer.current) window.clearTimeout(noticeTimer.current)
+    noticeTimer.current = window.setTimeout(() => setNotice(null), 2500)
+  }, [])
+
+  const loadFavorites = useCallback((): void => {
     api
       .get('/apps/list', { params: { favorites_only: 1 } })
       .then((r) => setFavorites(r.data))
       .catch(() => setFavorites([]))
   }, [])
+
+  useEffect(() => {
+    loadFavorites()
+  }, [loadFavorites])
 
   // Alt+Space global shortcut toggles the quick-input panel.
   useEffect(() => {
@@ -117,8 +132,98 @@ export default function FloatingBall(): JSX.Element {
     }
   }
 
+  const onDragOver = (e: DragEvent<HTMLDivElement>): void => {
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'copy'
+    if (!dragging) setDragging(true)
+    // Auto-hide if the drag is cancelled (Esc) or stalls without further events.
+    if (dragResetTimer.current) window.clearTimeout(dragResetTimer.current)
+    dragResetTimer.current = window.setTimeout(() => setDragging(false), 2500)
+  }
+
+  const onDragEnter = (e: DragEvent<HTMLDivElement>): void => {
+    e.preventDefault()
+    setDragging(true)
+  }
+
+  const onDragLeave = (e: DragEvent<HTMLDivElement>): void => {
+    e.preventDefault()
+    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+      setDragging(false)
+    }
+  }
+
+  const onDragEnd = (): void => {
+    setDragging(false)
+  }
+
+  const onDrop = async (e: DragEvent<HTMLDivElement>): Promise<void> => {
+    e.preventDefault()
+    setDragging(false)
+    const files = Array.from(e.dataTransfer.files ?? [])
+    const paths: string[] = []
+    for (const f of files) {
+      try {
+        const p = window.paicc?.getPathForFile(f)
+        if (p) paths.push(p)
+      } catch {
+        /* file has no resolvable filesystem path — skip */
+      }
+    }
+    if (paths.length === 0) return
+    const results = await Promise.allSettled(
+      paths.map((p) => api.post('/apps/pin', { path: p })),
+    )
+    const okCount = results.filter(
+      (r) => r.status === 'fulfilled' && r.value?.data?.ok,
+    ).length
+    const failed = paths.length - okCount
+    showNotice(
+      failed > 0
+        ? failed === paths.length
+          ? '添加失败，请检查文件'
+          : `已添加 ${okCount} 个，${failed} 个失败`
+        : `已添加 ${okCount} 个快捷方式`,
+    )
+    loadFavorites()
+  }
+
+  const onBallMouseDown = (e: ReactMouseEvent<HTMLDivElement>): void => {
+    if (e.button !== 0) return
+    const startX = e.screenX
+    const startY = e.screenY
+    didDrag.current = false
+    window.paicc?.ballDragStart(startX, startY)
+    const move = (ev: MouseEvent): void => {
+      if (
+        !didDrag.current &&
+        Math.abs(ev.screenX - startX) + Math.abs(ev.screenY - startY) > 4
+      ) {
+        didDrag.current = true
+      }
+      window.paicc?.ballDragMove(ev.screenX, ev.screenY)
+    }
+    const up = (): void => {
+      window.paicc?.ballDragEnd()
+      window.removeEventListener('mousemove', move)
+      window.removeEventListener('mouseup', up)
+    }
+    window.addEventListener('mousemove', move)
+    window.addEventListener('mouseup', up)
+  }
+
   return (
-    <div className="ball-root" onMouseLeave={onWinLeave}>
+    <div
+      className={`ball-root${dragging ? ' dragging' : ''}`}
+      onMouseLeave={onWinLeave}
+      onDragOver={onDragOver}
+      onDragEnter={onDragEnter}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+      onDragEnd={onDragEnd}
+    >
+      {dragging && <div className="ball-drop-hint">松开以添加到快捷启动</div>}
+      {notice && <div className="ball-notice">{notice}</div>}
       {menuOpen && !inputOpen && (
         <>
           {MENU.map((item, i) => {
@@ -193,7 +298,12 @@ export default function FloatingBall(): JSX.Element {
         style={{ left: CENTER_X - BALL_SIZE / 2, top: CENTER_Y - BALL_SIZE / 2 }}
         onMouseEnter={onBallEnter}
         onMouseLeave={onBallLeave}
+        onMouseDown={onBallMouseDown}
         onClick={() => {
+          if (didDrag.current) {
+            didDrag.current = false
+            return
+          }
           setMenuOpen(false)
           setInputOpen((v) => !v)
         }}

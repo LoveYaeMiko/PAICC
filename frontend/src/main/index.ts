@@ -13,6 +13,8 @@ let tray: Tray | null = null
 let backendProc: ChildProcess | null = null
 let backendReady = false
 let isQuitting = false
+let ballDragCursor: { x: number; y: number } | null = null
+let ballDragPos: number[] | null = null
 
 const isDev = !app.isPackaged
 const rendererUrl = process.env['ELECTRON_RENDERER_URL']
@@ -200,6 +202,9 @@ function createBallWindow(): void {
 }
 
 function loadRenderer(win: BrowserWindow, view: 'main' | 'ball'): void {
+  // Prevent OS file-drops (or any cross-document navigation) from navigating the
+  // window away from the app UI.
+  win.webContents.on('will-navigate', (e) => e.preventDefault())
   const query = `view=${view}`
   if (rendererUrl) {
     win.loadURL(`${rendererUrl}?${query}`)
@@ -236,10 +241,31 @@ function createTray(): void {
 // IPC
 // ---------------------------------------------------------------------------
 function registerIpc(): void {
-  ipcMain.handle('paicc:get-backend-url', () => BACKEND_URL)
-  ipcMain.handle('paicc:get-view', (e) => {
+  // The preload reads these two synchronously via `sendSync`, so they must be
+  // `ipcMain.on` (which sets `event.returnValue`) — `ipcMain.handle` only serves `invoke`.
+  ipcMain.on('paicc:get-backend-url', (e) => {
+    e.returnValue = BACKEND_URL
+  })
+  ipcMain.on('paicc:get-view', (e) => {
     const w = BrowserWindow.fromWebContents(e.sender)
-    return w === ballWindow ? 'ball' : 'main'
+    e.returnValue = w === ballWindow ? 'ball' : 'main'
+  })
+  // Manual frameless-window dragging for the ball (it is a drop target, so it
+  // cannot use `-webkit-app-region: drag`).
+  ipcMain.on('paicc:ball-drag-start', (_e, x: number, y: number) => {
+    if (!ballWindow) return
+    ballDragCursor = { x, y }
+    ballDragPos = ballWindow.getPosition()
+  })
+  ipcMain.on('paicc:ball-drag-move', (_e, x: number, y: number) => {
+    if (!ballWindow || !ballDragCursor || !ballDragPos) return
+    const dx = x - ballDragCursor.x
+    const dy = y - ballDragCursor.y
+    ballWindow.setPosition(ballDragPos[0] + dx, ballDragPos[1] + dy)
+  })
+  ipcMain.on('paicc:ball-drag-end', () => {
+    ballDragCursor = null
+    ballDragPos = null
   })
   ipcMain.on('paicc:window-minimize', (e) => BrowserWindow.fromWebContents(e.sender)?.minimize())
   ipcMain.on('paicc:window-hide', (e) => BrowserWindow.fromWebContents(e.sender)?.hide())

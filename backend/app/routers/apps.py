@@ -30,6 +30,10 @@ class FavoriteRequest(BaseModel):
     is_favorite: bool
 
 
+class PinRequest(BaseModel):
+    path: str
+
+
 @router.get("/list")
 def list_apps(favorites_only: bool = False) -> list[dict[str, Any]]:
     return app_manager.list_apps(favorites_only)
@@ -61,6 +65,12 @@ def uninstall_app(req: UninstallRequest) -> dict[str, Any]:
 @router.post("/favorite")
 def set_favorite(req: FavoriteRequest) -> dict[str, Any]:
     return app_manager.set_favorite(req.id, req.is_favorite)
+
+
+@router.post("/pin")
+async def pin_app(req: PinRequest) -> dict[str, Any]:
+    """Register a dropped file (.lnk/.exe) as a favorite quick-launch app."""
+    return await asyncio.to_thread(app_manager.pin_path, req.path)
 
 
 @router.get("/icon/{app_id}")

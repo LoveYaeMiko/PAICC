@@ -272,6 +272,46 @@ def set_favorite(app_id: int, is_favorite: bool) -> dict[str, Any]:
     return {"ok": True, "id": app_id, "is_favorite": bool(is_favorite)}
 
 
+def pin_path(path: str) -> dict[str, Any]:
+    """Register a dropped shortcut/executable as a favorite quick-launch app.
+
+    ``.lnk`` files are resolved to their target executable (so launching still works
+    if the shortcut is later moved); any other file is pinned as-is and launched via
+    its default handler. The row is upserted and marked favorite so it shows up in the
+    floating-ball quick-launch ring.
+    """
+    raw = (path or "").strip().strip('"')
+    p = Path(raw)
+    if not p.is_file():
+        return {"ok": False, "error": f"not a file: {path}"}
+
+    name = p.stem.strip()
+    target = str(p)
+    if p.suffix.lower() == ".lnk":
+        resolved = _resolve_lnk_target(p)
+        if resolved:
+            target = resolved
+    if not name:
+        name = Path(target).stem.strip()
+    if not name:
+        return {"ok": False, "error": "could not derive an app name"}
+
+    # Reuse an existing row keyed on the resolved target so a Desktop "Chrome.lnk"
+    # doesn't duplicate an executable already cached under a different name.
+    row = db.query_one("SELECT * FROM apps WHERE path = ?", (target,))
+    if row is None:
+        _upsert_app(name, target)
+        row = db.query_one("SELECT * FROM apps WHERE path = ?", (target,))
+    if row is None:
+        return {"ok": False, "error": "failed to register app"}
+    db.execute("UPDATE apps SET is_favorite = 1 WHERE id = ?", (row["id"],))
+    row["is_favorite"] = True
+    db.log_operation(
+        "app_pin", {"path": path, "name": name, "target": target}, {"id": row["id"]}
+    )
+    return {"ok": True, "app": row}
+
+
 # --------------------------------------------------------------------------- #
 # Actions
 # --------------------------------------------------------------------------- #
