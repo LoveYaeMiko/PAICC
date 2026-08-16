@@ -39,7 +39,7 @@ export default function StoragePage(): JSX.Element {
   const [reports, setReports] = useState<StorageReport[]>([])
   const [reportsLoading, setReportsLoading] = useState<boolean>(false)
 
-  const [schedule, setSchedule] = useState<string>('off')
+  const [schedule, setSchedule] = useState<string>('weekly')
   const [scheduleSaving, setScheduleSaving] = useState<boolean>(false)
 
   const [cleanableItems, setCleanableItems] = useState<CleanableItem[]>([])
@@ -71,10 +71,20 @@ export default function StoragePage(): JSX.Element {
     }
   }, [])
 
+  const loadSchedule = useCallback(async (): Promise<void> => {
+    try {
+      const { data } = await api.get<{ schedule: string }>('/storage/analysis/schedule')
+      setSchedule(data.schedule)
+    } catch {
+      /* keep the current selection on failure */
+    }
+  }, [])
+
   useEffect(() => {
     void loadReports()
     void loadCleanable()
-  }, [loadReports, loadCleanable])
+    void loadSchedule()
+  }, [loadReports, loadCleanable, loadSchedule])
 
   const handleGenerate = async (): Promise<void> => {
     setReportGenerating(true)

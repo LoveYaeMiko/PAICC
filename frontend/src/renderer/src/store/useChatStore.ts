@@ -24,11 +24,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const history = [...get().messages, user]
     set({ messages: history, sending: true, pendingConfirmation: null })
     try {
-      const { data } = await api.post('/ai/chat', {
-        messages: history.map((m) => ({ role: m.role, content: m.content })),
-        use_tools: true,
-        confirmation_id: confirmationId,
-      })
+      const { data } = await api.post(
+        '/ai/chat',
+        {
+          messages: history.map((m) => ({ role: m.role, content: m.content })),
+          use_tools: true,
+          confirmation_id: confirmationId,
+        },
+        { timeout: 120000 },
+      )
       const assistant: ChatMessage = {
         role: 'assistant',
         content: data.content,
@@ -72,11 +76,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const history = get().messages
     set({ sending: true })
     try {
-      const { data } = await api.post('/ai/chat', {
-        messages: history.map((m) => ({ role: m.role, content: m.content })),
-        use_tools: true,
-        confirmation_id: conf.confirmation_id,
-      })
+      const { data } = await api.post(
+        '/ai/chat',
+        {
+          messages: history.map((m) => ({ role: m.role, content: m.content })),
+          use_tools: true,
+          confirmation_id: conf.confirmation_id,
+        },
+        { timeout: 120000 },
+      )
       const assistant: ChatMessage = {
         role: 'assistant',
         content: data.content,

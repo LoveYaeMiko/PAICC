@@ -168,12 +168,27 @@ def get_system_stats() -> dict[str, Any]:
     }
 
 
+#: Module-level GPU cache (``nvidia-smi`` is a subprocess; don't spawn it on every
+#: 2-second monitor tick or page-load status call).
+_gpu_cache: dict[str, Any] = {"timestamp": 0.0, "value": []}
+_GPU_CACHE_TTL = 10.0
+
+
 def _gpu_stats() -> list[dict[str, Any]]:
-    """Read GPU metrics via ``nvidia-smi``, falling back to GPUtil, else ``[]``."""
+    """Read GPU metrics via ``nvidia-smi``, falling back to GPUtil, else ``[]``.
+
+    Results are cached briefly so the 2-second monitor loop and page-load status
+    calls don't each pay the cost of spawning ``nvidia-smi``.
+    """
+    now = time.time()
+    if now - _gpu_cache["timestamp"] < _GPU_CACHE_TTL:
+        return _gpu_cache["value"]
     result = _gpu_stats_nvidia_smi()
-    if result:
-        return result
-    return _gpu_stats_gputil()
+    if not result:
+        result = _gpu_stats_gputil()
+    _gpu_cache["timestamp"] = now
+    _gpu_cache["value"] = result
+    return result
 
 
 def _to_float(value: str) -> float | None:
@@ -198,7 +213,7 @@ def _gpu_stats_nvidia_smi() -> list[dict[str, Any]]:
             ],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=4,
         )
     except (OSError, subprocess.TimeoutExpired):
         return []

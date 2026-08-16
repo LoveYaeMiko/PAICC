@@ -7,6 +7,7 @@ of executing, and the caller must re-invoke with a valid ``confirmation_id``.
 """
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 from typing import Any, Callable
@@ -81,9 +82,14 @@ async def dispatch(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
             return {"needs_confirmation": True, **req}
 
     try:
-        result = fn(**args)
-        if inspect.isawaitable(result):
-            result = await result
+        # Sync handlers (subprocess / file-system / psutil work) MUST run off the
+        # event loop. Running them inline blocks every other request (health checks,
+        # WebSocket pushes, other pages) for as long as the tool takes — which is why
+        # the backend appeared to "freeze" or disconnect while the AI executed a tool.
+        if inspect.iscoroutinefunction(fn):
+            result = await fn(**args)
+        else:
+            result = await asyncio.to_thread(fn, **args)
     except Exception as exc:  # noqa: BLE001
         logger.exception("tool %s failed", name)
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}

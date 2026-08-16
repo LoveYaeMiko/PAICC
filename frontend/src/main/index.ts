@@ -172,9 +172,11 @@ function createMainWindow(): void {
   loadRenderer(mainWindow, 'main')
   mainWindow.once('ready-to-show', () => mainWindow?.show())
   mainWindow.on('close', (e) => {
-    // Hide to tray instead of quitting.
-    e.preventDefault()
-    mainWindow?.hide()
+    // Hide to tray instead of quitting — unless we are actually quitting.
+    if (!isQuitting) {
+      e.preventDefault()
+      mainWindow?.hide()
+    }
   })
 }
 
@@ -271,6 +273,7 @@ function registerIpc(): void {
   ipcMain.on('paicc:window-hide', (e) => BrowserWindow.fromWebContents(e.sender)?.hide())
   ipcMain.on('paicc:ball-hide', () => ballWindow?.hide())
   ipcMain.on('paicc:show-main', () => mainWindow?.show())
+  ipcMain.on('paicc:app-quit', () => app.quit())
   ipcMain.on('paicc:open-external', (_e, url: string) => {
     if (typeof url === 'string' && /^https?:\/\//.test(url)) shell.openExternal(url)
   })

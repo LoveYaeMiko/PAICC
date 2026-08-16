@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app import db, ws
+from app.config import settings
 from app.deps import require_confirmation
 from app.services import storage_analysis
 
@@ -45,6 +46,12 @@ def get_report(report_id: int) -> dict[str, Any]:
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
     return report
+
+
+@router.get("/analysis/schedule")
+def get_schedule() -> dict[str, Any]:
+    """Return the current automatic report schedule (weekly / monthly / off)."""
+    return {"schedule": settings.get("report_schedule", "weekly")}
 
 
 @router.post("/analysis/schedule")

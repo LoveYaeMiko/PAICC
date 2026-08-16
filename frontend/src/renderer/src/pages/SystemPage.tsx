@@ -114,7 +114,7 @@ export default function SystemPage(): JSX.Element {
 
   const loadPowerPlans = useCallback(async () => {
     try {
-      const res = await api.get<unknown>('/power-plans')
+      const res = await api.get<unknown>('/system/power-plans')
       setPowerPlans(extractNames(res.data))
     } catch (e) {
       notification.error({ message: '获取电源计划失败', description: errMsg(e) })
@@ -166,7 +166,7 @@ export default function SystemPage(): JSX.Element {
   const applyPowerPlan = async (name: string): Promise<void> => {
     setPowerLoading(true)
     try {
-      await api.post('/power-plan', { name })
+      await api.post('/system/power-plan', { name })
       setPowerPlan(name)
       notification.success({ message: '电源计划已切换', description: name })
     } catch (e) {

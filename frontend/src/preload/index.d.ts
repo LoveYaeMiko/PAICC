@@ -7,6 +7,7 @@ export interface PaiccBridge {
   hide: () => void
   hideBall: () => void
   showMain: () => void
+  quitApp: () => void
   openExternal: (url: string) => void
   openRoute: (route: string) => void
   getPathForFile: (file: any) => string

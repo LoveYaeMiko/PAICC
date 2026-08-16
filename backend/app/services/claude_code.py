@@ -125,14 +125,23 @@ def _cmd_escape_arg(value: str) -> str:
 def _claude_command() -> list[str]:
     """Build the spawn argv, routing ``.cmd``/``.bat`` through ``cmd /c`` on Windows.
 
-    The ``--append-system-prompt`` flag (verified against the installed CLI) injects
-    a one-line system-state summary as extra context for the session. When routing
-    through ``cmd``, each argument is escaped and the command is passed as a single
-    string so ``cmd`` re-parses it correctly (avoids metacharacter injection and
-    broken multi-word flags).
+    The CLI runs in SDK mode (``-p --output-format stream-json --input-format
+    stream-json``) so stdin/stdout are machine-readable JSON lines rather than an
+    interactive TUI — ``--output-format`` is ignored without ``-p``, and stream-json
+    additionally requires ``--verbose`` on this CLI version. ``--append-system-prompt``
+    injects a one-line system-state summary as extra context. When routing through
+    ``cmd``, each argument is escaped and the command is passed as a single string so
+    ``cmd`` re-parses it correctly (avoids metacharacter injection and broken
+    multi-word flags).
     """
     path = _resolve_claude() or "claude"
-    args = [path, "--output-format", "stream-json"]
+    args = [
+        path,
+        "-p",
+        "--output-format", "stream-json",
+        "--input-format", "stream-json",
+        "--verbose",
+    ]
     context = _build_context()
     if context:
         args += ["--append-system-prompt", context]
@@ -172,20 +181,63 @@ def _cwd() -> str:
 
 
 def _publish_line(line: str) -> None:
-    """Parse one line of CLI output and publish it as a typed event."""
+    """Parse one line of CLI output and publish it as a typed, normalized event.
+
+    ``stream-json`` nests the assistant text inside ``message.content`` (a list of
+    ``text`` / ``thinking`` / ``tool_use`` blocks), so we flatten the text blocks here
+    and forward a simple ``{type, text}`` shape the frontend can render directly.
+    """
     try:
         data = json.loads(line)
     except json.JSONDecodeError:
         publish("claude_event", {"type": "raw", "raw": line})
         return
-    if isinstance(data, dict):
-        raw_type = str(data.get("type", ""))
-        event = dict(data)
-        event["type"] = _normalize_type(raw_type)
-        event["raw_type"] = raw_type
-        publish("claude_event", event)
-    else:
+    if not isinstance(data, dict):
         publish("claude_event", {"type": "raw", "raw": line})
+        return
+
+    raw_type = str(data.get("type", ""))
+
+    if raw_type == "assistant":
+        msg = data.get("message") if isinstance(data.get("message"), dict) else {}
+        content = msg.get("content")
+        text = ""
+        tool_uses: list[dict[str, Any]] = []
+        if isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "text":
+                    text += str(block.get("text") or "")
+                elif btype == "tool_use":
+                    tool_uses.append(block)
+        if text:
+            publish("claude_event", {"type": "assistant", "text": text})
+        for tu in tool_uses:
+            publish(
+                "claude_event",
+                {"type": "tool_use", "name": tu.get("name") or "unknown", "input": tu.get("input")},
+            )
+        return
+
+    if raw_type == "result":
+        publish(
+            "claude_event",
+            {
+                "type": "result",
+                "text": str(data.get("result") or ""),
+                "subtype": data.get("subtype"),
+                "is_error": bool(data.get("is_error")),
+            },
+        )
+        return
+
+    # system / init / tool_result / error / raw — pass through with a normalized type.
+    event = dict(data)
+    event["type"] = _normalize_type(raw_type)
+    event["raw_type"] = raw_type
+    publish("claude_event", event)
 
 
 def _mark_ended(p: subprocess.Popen[str]) -> None:
@@ -459,22 +511,37 @@ def start_session() -> dict[str, Any]:
 
 
 def send_message(text: str) -> dict[str, Any]:
-    """Send a line of input to the running session (auto-starting if needed)."""
+    """Send a user message to the running session (auto-starting if needed).
+
+    Input is written as a single ``stream-json`` user message (SDK mode) rather than
+    raw text, since the CLI is launched with ``--input-format stream-json``.
+    """
     if not running or proc is None or proc.poll() is not None:
         res = start_session()
         if not res.get("ok"):
             return res
 
+    payload = json.dumps(
+        {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": text}],
+            },
+        },
+        ensure_ascii=False,
+    )
+
     with _lock:
         if proc is None or proc.stdin is None or proc.poll() is not None:
             return {"ok": False, "error": "claude session is not running"}
         try:
-            proc.stdin.write(text + "\n")
+            proc.stdin.write(payload + "\n")
             proc.stdin.flush()
         except (OSError, ValueError) as exc:
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
-    publish("claude_event", {"type": "user", "message": text})
+    publish("claude_event", {"type": "user", "text": text})
     db.log_operation("claude_message_sent", {"text": text}, {"ok": True})
     return {"ok": True}
 

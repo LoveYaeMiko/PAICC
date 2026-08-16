@@ -81,18 +81,24 @@ export default function ClaudeTerminal(): JSX.Element {
 
     switch (data.type) {
       case 'assistant': {
-        const text = asString(data.message) ?? asString(data.text)
+        const text = asString(data.text)
         if (text) term.write(`${text}\r\n`)
+        break
+      }
+      case 'result': {
+        const text = asString(data.text) ?? ''
+        const isError = data.is_error === true || String(data.subtype ?? '').includes('error')
+        if (text) term.write(`${isError ? '\x1b[31m' : ''}${text}${isError ? '\x1b[0m' : ''}\r\n`)
         break
       }
       case 'tool_use': {
         const name = asString(data.name) ?? 'unknown'
-        term.write(`[tool] ${name}\r\n`)
+        term.write(`\x1b[90m[tool] ${name}\x1b[0m\r\n`)
         break
       }
       case 'tool_result': {
         const value = data.result ?? data.content ?? data.text
-        term.write(`[result] ${fmt(value)}\r\n`)
+        term.write(`\x1b[90m[result] ${fmt(value)}\x1b[0m\r\n`)
         break
       }
       case 'error': {
@@ -100,6 +106,10 @@ export default function ClaudeTerminal(): JSX.Element {
         term.write(`\x1b[31m${text}\x1b[0m\r\n`)
         break
       }
+      // system / init / raw — silent, not meaningful for the user
+      case 'system':
+      case 'init':
+        break
       default:
         term.write(`${JSON.stringify(data)}\r\n`)
     }

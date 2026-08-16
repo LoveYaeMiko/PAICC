@@ -7,6 +7,7 @@ import {
   FileSearchOutlined,
   LineChartOutlined,
   PieChartOutlined,
+  PoweroffOutlined,
   SendOutlined,
   SettingOutlined,
 } from '@ant-design/icons'
@@ -60,7 +61,7 @@ export default function FloatingBall(): JSX.Element {
   const [menuOpen, setMenuOpen] = useState(false)
   const [inputOpen, setInputOpen] = useState(false)
   const [text, setText] = useState('')
-  const [answer, setAnswer] = useState<string | null>(null)
+  const [history, setHistory] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([])
   const [loading, setLoading] = useState(false)
   const [favorites, setFavorites] = useState<AppEntry[]>([])
   const [dragging, setDragging] = useState(false)
@@ -110,15 +111,23 @@ export default function FloatingBall(): JSX.Element {
     if (!t || loading) return
     setText('')
     setLoading(true)
-    setAnswer('')
+    const next = [...history, { role: 'user' as const, content: t }]
+    setHistory(next)
     try {
-      const { data } = await api.post('/ai/chat', {
-        messages: [{ role: 'user', content: t }],
-        use_tools: true,
-      })
-      setAnswer(data.needs_confirmation ? `⚠️ 需要确认：${data.confirmation?.title}` : data.content)
+      const { data } = await api.post(
+        '/ai/chat',
+        {
+          messages: next.map((m) => ({ role: m.role, content: m.content })),
+          use_tools: true,
+        },
+        { timeout: 120000 },
+      )
+      const content = data.needs_confirmation
+        ? `⚠️ 需要确认：${data.confirmation?.title ?? ''}`
+        : data.content
+      setHistory([...next, { role: 'assistant', content }])
     } catch {
-      setAnswer('请求失败，请检查后端连接。')
+      setHistory([...next, { role: 'assistant', content: '请求失败，请检查后端连接。' }])
     } finally {
       setLoading(false)
     }
@@ -129,6 +138,16 @@ export default function FloatingBall(): JSX.Element {
       await api.post('/apps/start', { id })
     } catch {
       /* noop */
+    }
+  }
+
+  const unfavorite = async (id: number, name: string): Promise<void> => {
+    try {
+      await api.post('/apps/favorite', { id, is_favorite: false })
+      showNotice(`已从快捷启动移除「${name}」`)
+      loadFavorites()
+    } catch {
+      showNotice('移除失败，请重试')
     }
   }
 
@@ -224,6 +243,9 @@ export default function FloatingBall(): JSX.Element {
     >
       {dragging && <div className="ball-drop-hint">松开以添加到快捷启动</div>}
       {notice && <div className="ball-notice">{notice}</div>}
+      <div className="ball-quit" title="退出 PAICC" onClick={() => window.paicc?.quitApp()}>
+        <PoweroffOutlined />
+      </div>
       {menuOpen && !inputOpen && (
         <>
           {MENU.map((item, i) => {
@@ -250,9 +272,13 @@ export default function FloatingBall(): JSX.Element {
               <div
                 key={app.id}
                 className="radial-item"
-                title={app.name}
+                title={`${app.name}（右键移除）`}
                 style={{ left, top, width: 32, height: 32, fontSize: 12 }}
                 onClick={() => launch(app.id)}
+                onContextMenu={(e) => {
+                  e.preventDefault()
+                  void unfavorite(app.id, app.name)
+                }}
               >
                 <AppIcon app={app} size={22} />
               </div>
@@ -263,7 +289,17 @@ export default function FloatingBall(): JSX.Element {
 
       {inputOpen && (
         <>
-          <div className="ball-input" style={{ left: 20, top: 128, width: 300 }}>
+          {history.length > 0 && (
+            <div className="ball-answer" style={{ left: 20, top: 12 }}>
+              {history.map((m, i) => (
+                <div key={i} className={m.role === 'user' ? 'ball-msg-user' : 'ball-msg-assistant'}>
+                  {m.content}
+                </div>
+              ))}
+              {loading && <div className="ball-msg-assistant ball-msg-thinking">思考中…</div>}
+            </div>
+          )}
+          <div className="ball-input" style={{ left: 20, top: 176, width: 300 }}>
             <textarea
               autoFocus
               value={text}
@@ -281,15 +317,10 @@ export default function FloatingBall(): JSX.Element {
               style={{ color: '#8a93a6', cursor: 'pointer' }}
               onClick={() => {
                 setInputOpen(false)
-                setAnswer(null)
+                setHistory([])
               }}
             />
           </div>
-          {answer != null && (
-            <div className="ball-answer" style={{ left: 20, top: 12 }}>
-              {loading ? '思考中…' : answer}
-            </div>
-          )}
         </>
       )}
 

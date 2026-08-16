@@ -13,6 +13,7 @@ const api = {
   hide: (): void => ipcRenderer.send('paicc:window-hide'),
   hideBall: (): void => ipcRenderer.send('paicc:ball-hide'),
   showMain: (): void => ipcRenderer.send('paicc:show-main'),
+  quitApp: (): void => ipcRenderer.send('paicc:app-quit'),
   openExternal: (url: string): void => ipcRenderer.send('paicc:open-external', url),
   openRoute: (route: string): void => ipcRenderer.send('paicc:open-route', route),
   // Resolve an OS-dropped File to its absolute path (File.path is deprecated in Electron 32+).

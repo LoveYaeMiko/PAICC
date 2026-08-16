@@ -1,9 +1,15 @@
 """Runtime configuration.
 
 Resolution order (highest first):
-  1. Environment variables (``PAICC_<KEY_UPPER>``)
-  2. SQLite ``settings`` table (editable from the Settings UI)
-  3. Built-in defaults below
+  1. SQLite ``settings`` table — an explicit user override (a value that is non-empty
+     *and* differs from the built-in default) wins. This is what makes Settings-UI
+     edits persist across restarts.
+  2. Environment variables (``PAICC_<KEY_UPPER>``) — including values loaded from
+     ``backend/.env``. These act as the initial/fallback configuration (secrets such
+     as the LLM API key or SMTP password typically live here so they stay out of git).
+  3. SQLite ``settings`` table — any remaining value (e.g. the row seeded from the
+     built-in defaults at first boot).
+  4. Built-in defaults below.
 
 The DB layer is imported lazily so this module never creates a circular import and
 the settings can be read before the database is initialised.
@@ -47,6 +53,8 @@ DEFAULTS: dict[str, Any] = {
     "smtp_password": "",
     "smtp_from": "",
     "smtp_to": "",
+    # Storage report schedule
+    "report_schedule": "weekly",
     # Misc
     "backend_port": "8000",
     "everything_path": "es.exe",
@@ -66,16 +74,26 @@ class Settings:
     """Typed, layered access to configuration."""
 
     def get(self, key: str, default: Any = None) -> Any:
+        default_val = DEFAULTS.get(key, default)
+        try:
+            val = _db().get_setting(key)
+        except Exception:
+            val = None
+
+        # A DB value only counts as an explicit user override when it is non-empty and
+        # differs from the built-in default. Rows seeded from the defaults at first boot
+        # must NOT shadow the .env configuration (e.g. the Everything CLI path or the
+        # LLM API key), so those fall through to the environment variable below.
+        if val is not None and str(val) != "" and str(val) != str(default_val):
+            return val
+
         env_key = f"PAICC_{key.upper()}"
         if env_key in os.environ:
             return os.environ[env_key]
-        try:
-            val = _db().get_setting(key)
-            if val is not None:
-                return val
-        except Exception:
-            pass
-        return DEFAULTS.get(key, default)
+
+        if val is not None:
+            return val
+        return default_val
 
     def set(self, key: str, value: Any) -> None:
         try:
