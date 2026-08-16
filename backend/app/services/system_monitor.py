@@ -11,6 +11,7 @@ A background loop (started idempotently via :func:`start`) pushes
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -22,6 +23,7 @@ from typing import Any
 
 import psutil
 
+from app.config import settings
 from app.ws import publish
 
 logger = logging.getLogger(__name__)
@@ -29,6 +31,10 @@ logger = logging.getLogger(__name__)
 #: Module-level network-rate state (previous counters + timestamp).
 _net_lock = threading.Lock()
 _prev_net: dict[str, float] = {"bytes_sent": 0.0, "bytes_recv": 0.0, "timestamp": 0.0}
+
+#: Module-level disk-I/O rate state (previous counters + timestamp).
+_disk_lock = threading.Lock()
+_prev_disk: dict[str, float] = {"read_bytes": 0.0, "write_bytes": 0.0, "timestamp": 0.0}
 
 #: Module-level guard so start() is idempotent.
 _started = False
@@ -111,6 +117,39 @@ def get_system_stats() -> dict[str, Any]:
         "recv_per_sec": round(recv_per_sec, 1),
     }
 
+    try:
+        disk_io_counters = psutil.disk_io_counters()
+    except (OSError, AttributeError):
+        disk_io_counters = None
+
+    with _disk_lock:
+        prev_disk = _prev_disk
+        if disk_io_counters is not None:
+            read_bytes = disk_io_counters.read_bytes
+            write_bytes = disk_io_counters.write_bytes
+            if prev_disk["timestamp"]:
+                dt = now - prev_disk["timestamp"]
+                if dt > 0:
+                    read_per_sec = (read_bytes - prev_disk["read_bytes"]) / dt
+                    write_per_sec = (write_bytes - prev_disk["write_bytes"]) / dt
+                else:
+                    read_per_sec = write_per_sec = 0.0
+            else:
+                read_per_sec = write_per_sec = 0.0
+            _prev_disk["read_bytes"] = read_bytes
+            _prev_disk["write_bytes"] = write_bytes
+            _prev_disk["timestamp"] = now
+        else:
+            read_bytes = write_bytes = 0
+            read_per_sec = write_per_sec = 0.0
+
+    disk_io = {
+        "read_bytes": read_bytes,
+        "write_bytes": write_bytes,
+        "read_per_sec": round(read_per_sec, 1),
+        "write_per_sec": round(write_per_sec, 1),
+    }
+
     gpu = _gpu_stats()
 
     uptime_seconds = round(time.time() - psutil.boot_time(), 1)
@@ -123,6 +162,7 @@ def get_system_stats() -> dict[str, Any]:
         "memory": memory,
         "disk": disk,
         "net": net,
+        "disk_io": disk_io,
         "gpu": gpu,
         "uptime_seconds": uptime_seconds,
     }
@@ -210,9 +250,12 @@ def _gpu_stats_gputil() -> list[dict[str, Any]]:
 def get_processes(sort_by: str = "cpu") -> list[dict[str, Any]]:
     """Return up to 200 processes, sorted descending by the requested key.
 
-    ``sort_by`` may be ``cpu``, ``memory`` (both descending) or ``name``
-    (ascending, case-insensitive).
+    ``sort_by`` may be ``cpu``, ``memory`` or ``disk`` (all descending) or
+    ``name`` (ascending, case-insensitive). Per-process *network* I/O is not
+    available via psutil (``io_counters`` only reports disk read/write bytes),
+    so there is deliberately no ``network`` sort option here.
     """
+    key = sort_by.strip().lower() if sort_by else "cpu"
     attrs = [
         "pid", "name", "username", "cpu_percent", "memory_percent",
         "memory_info", "create_time", "exe", "cmdline", "status",
@@ -225,26 +268,39 @@ def get_processes(sort_by: str = "cpu") -> list[dict[str, Any]]:
             continue
 
         mem_info = info.get("memory_info")
-        processes.append(
-            {
-                "pid": info.get("pid"),
-                "name": info.get("name") or "",
-                "username": info.get("username"),
-                "cpu_percent": round(info.get("cpu_percent") or 0.0, 1),
-                "memory_percent": round(info.get("memory_percent") or 0.0, 1),
-                "memory_rss": mem_info.rss if mem_info else 0,
-                "create_time": round(info.get("create_time") or 0.0, 1),
-                "exe": info.get("exe"),
-                "cmdline": " ".join(info.get("cmdline") or []) or "",
-                "status": info.get("status"),
-            }
-        )
+        item: dict[str, Any] = {
+            "pid": info.get("pid"),
+            "name": info.get("name") or "",
+            "username": info.get("username"),
+            "cpu_percent": round(info.get("cpu_percent") or 0.0, 1),
+            "memory_percent": round(info.get("memory_percent") or 0.0, 1),
+            "memory_rss": mem_info.rss if mem_info else 0,
+            "create_time": round(info.get("create_time") or 0.0, 1),
+            "exe": info.get("exe"),
+            "cmdline": " ".join(info.get("cmdline") or []) or "",
+            "status": info.get("status"),
+        }
+        if key == "disk":
+            disk_read = disk_write = 0
+            try:
+                io = p.io_counters()
+                disk_read = io.read_bytes
+                disk_write = io.write_bytes
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                pass
+            item["disk_read_bytes"] = disk_read
+            item["disk_write_bytes"] = disk_write
+        processes.append(item)
 
-    key = sort_by.strip().lower() if sort_by else "cpu"
     if key == "memory":
         processes.sort(key=lambda d: d["memory_percent"], reverse=True)
     elif key == "name":
         processes.sort(key=lambda d: (d["name"] or "").lower())
+    elif key == "disk":
+        processes.sort(
+            key=lambda d: (d.get("disk_read_bytes", 0) + d.get("disk_write_bytes", 0)),
+            reverse=True,
+        )
     else:  # cpu
         processes.sort(key=lambda d: d["cpu_percent"], reverse=True)
 
@@ -273,6 +329,32 @@ def kill_process(pid: int) -> dict[str, Any]:
         return {"ok": False, "message": f"Failed to terminate process {pid}: {exc}"}
 
     return {"ok": True, "message": f"Process {pid} terminated"}
+
+
+def reveal_process(pid: int) -> dict[str, Any]:
+    """Open Explorer with the process's executable selected.
+
+    Resolves the process executable via psutil and runs
+    ``explorer /select,"<exe>"`` so the file is highlighted in its folder.
+    Windows-only; returns ``{ok, path}``.
+    """
+    if os.name != "nt":
+        return {"ok": False, "message": "文件定位仅支持 Windows"}
+
+    try:
+        exe = psutil.Process(pid).exe()
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        return {"ok": False, "message": f"无法访问进程 {pid} 或其可执行文件路径"}
+
+    if not exe:
+        return {"ok": False, "message": f"进程 {pid} 没有可执行文件路径"}
+
+    try:
+        subprocess.Popen(["explorer", f'/select,"{exe}"'])
+    except OSError as exc:
+        return {"ok": False, "message": f"打开资源管理器失败: {exc}"}
+
+    return {"ok": True, "path": exe}
 
 
 def list_power_plans() -> list[dict[str, Any]]:
@@ -356,6 +438,226 @@ def _resolve_power_plan_guid(name: str) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Startup items (Windows registry Run keys + shell:startup folders)
+# ---------------------------------------------------------------------------
+
+try:
+    import winreg
+except ImportError:  # pragma: no cover - non-Windows
+    winreg = None  # type: ignore[assignment]
+
+_STARTUP_RUN_KEYS: list[tuple[Any, str, str]] = []
+if winreg is not None:
+    _STARTUP_RUN_KEYS = [
+        (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", "HKCU"),
+        (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion\Run", "HKLM"),
+    ]
+
+
+def _load_disabled_startup_items() -> dict[str, dict[str, Any]]:
+    """Load the disabled startup items map (name -> {command, location, source})."""
+    raw = settings.get("disabled_startup_items", "{}")
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+    except (ValueError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_disabled_startup_items(data: dict[str, dict[str, Any]]) -> None:
+    settings.set("disabled_startup_items", json.dumps(data, ensure_ascii=False))
+
+
+def list_startup_items() -> list[dict[str, Any]]:
+    """Enumerate startup items from registry Run keys and shell:startup folders.
+
+    Items that were disabled (deleted from the registry) are re-added from the
+    ``disabled_startup_items`` settings map with ``enabled=False`` so they remain
+    visible and can be re-enabled.
+    """
+    if os.name != "nt":
+        return []
+
+    disabled = _load_disabled_startup_items()
+    items: list[dict[str, Any]] = []
+    items.extend(_startup_items_from_registry())
+    items.extend(_startup_items_from_folders())
+
+    seen: set[str] = set()
+    for item in items:
+        item["enabled"] = item["name"] not in disabled
+        seen.add(item["name"])
+
+    for name, record in disabled.items():
+        if name in seen:
+            continue
+        items.append(
+            {
+                "name": name,
+                "command": record.get("command", ""),
+                "location": record.get("location", ""),
+                "source": record.get("source", "注册表"),
+                "enabled": False,
+            }
+        )
+
+    return items
+
+
+def _startup_items_from_registry() -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for hive, path, location in _STARTUP_RUN_KEYS:
+        try:
+            key = winreg.OpenKey(hive, path)
+        except OSError:
+            continue
+        with key:
+            index = 0
+            while True:
+                try:
+                    name, command, _ = winreg.EnumValue(key, index)
+                except OSError:
+                    break
+                index += 1
+                items.append(
+                    {
+                        "name": name or "",
+                        "command": command or "",
+                        "location": location,
+                        "source": "注册表",
+                        "enabled": True,
+                    }
+                )
+    return items
+
+
+def _startup_items_from_folders() -> list[dict[str, Any]]:
+    """List entries in the per-user and all-users shell:startup folders."""
+    folders = [
+        (os.environ.get("APPDATA", ""), "HKCU"),
+        (os.environ.get("ProgramData", ""), "HKLM"),
+    ]
+    items: list[dict[str, Any]] = []
+    for base, location in folders:
+        if not base:
+            continue
+        startup_dir = os.path.join(base, r"Microsoft\Windows\Start Menu\Programs\Startup")
+        try:
+            with os.scandir(startup_dir) as entries:
+                for entry in entries:
+                    try:
+                        if entry.name.startswith(".") or entry.is_dir():
+                            continue
+                        items.append(
+                            {
+                                "name": entry.name,
+                                "command": entry.path,
+                                "location": location,
+                                "source": "启动文件夹",
+                                "enabled": True,
+                            }
+                        )
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return items
+
+
+def set_startup_item(name: str, enabled: bool) -> dict[str, Any]:
+    """Enable/disable a startup item by deleting/restoring its Run registry value.
+
+    Disabling deletes the registry ``Run`` value and stores its command (plus
+    location) under the ``disabled_startup_items`` settings key; enabling restores
+    it. Only registry ``Run`` entries are togglable — startup-folder entries are
+    left untouched and reported as such.
+    """
+    if os.name != "nt":
+        return {"ok": False, "message": "开机启动项管理仅支持 Windows"}
+
+    disabled = _load_disabled_startup_items()
+
+    if not enabled:
+        entry = _find_run_value(name)
+        if entry is None:
+            return {"ok": False, "message": f"未找到注册表启动项: {name}"}
+        hive, path, location, command, value_type = entry
+        try:
+            key = winreg.OpenKey(hive, path, 0, winreg.KEY_SET_VALUE)
+        except OSError as exc:
+            return {"ok": False, "message": f"无法打开注册表项: {exc}"}
+        try:
+            with key:
+                winreg.DeleteValue(key, name)
+        except OSError as exc:
+            return {"ok": False, "message": f"删除启动项失败: {exc}"}
+        disabled[name] = {"command": command, "location": location, "source": "注册表", "type": int(value_type)}
+        _save_disabled_startup_items(disabled)
+        return {"ok": True, "message": f"已禁用启动项 {name}"}
+
+    if name in disabled:
+        record = disabled[name]
+        loc = _reg_location(record.get("location"))
+        if loc is None:
+            return {"ok": False, "message": f"无法确定启动项位置: {name}"}
+        hive, path = loc
+        try:
+            key = winreg.OpenKey(hive, path, 0, winreg.KEY_SET_VALUE)
+        except OSError as exc:
+            return {"ok": False, "message": f"无法打开注册表项: {exc}"}
+        try:
+            with key:
+                winreg.SetValueEx(
+                    key, name, 0, _restore_value_type(record.get("type")), record.get("command", "")
+                )
+        except OSError as exc:
+            return {"ok": False, "message": f"恢复启动项失败: {exc}"}
+        del disabled[name]
+        _save_disabled_startup_items(disabled)
+        return {"ok": True, "message": f"已启用启动项 {name}"}
+
+    return {"ok": True, "message": f"启动项 {name} 已启用"}
+
+
+def _find_run_value(name: str) -> tuple[Any, str, str, str, int] | None:
+    """Return ``(hive, path, location, command, value_type)`` for a Run value by name."""
+    for hive, path, location in _STARTUP_RUN_KEYS:
+        try:
+            key = winreg.OpenKey(hive, path)
+        except OSError:
+            continue
+        with key:
+            try:
+                command, value_type = winreg.QueryValueEx(key, name)
+            except OSError:
+                continue
+            return (hive, path, location, command or "", value_type)
+    return None
+
+
+def _restore_value_type(type_value: Any) -> int:
+    """Map a stored registry value type back to a ``winreg`` type constant.
+
+    ``REG_EXPAND_SZ`` values (e.g. ``%SystemRoot%\\...``) must be restored with their
+    original type or Windows will not re-expand them; legacy records saved without a
+    type default to ``REG_SZ``.
+    """
+    try:
+        t = int(type_value)
+    except (TypeError, ValueError):
+        return winreg.REG_SZ
+    return t if t in (winreg.REG_SZ, winreg.REG_EXPAND_SZ) else winreg.REG_SZ
+
+
+def _reg_location(location: Any) -> tuple[Any, str] | None:
+    """Map a stored location label (HKCU/HKLM) back to a ``(hive, path)`` tuple."""
+    for hive, path, loc in _STARTUP_RUN_KEYS:
+        if loc == location:
+            return (hive, path)
+    return None
+
+
 async def _monitor_loop() -> None:
     """Periodically publish system stats and throttled alerts."""
     last_alert = 0.0
@@ -366,15 +668,22 @@ async def _monitor_loop() -> None:
 
             cpu = float(stats.get("cpu_percent") or 0.0)
             disk_high = any((d.get("percent") or 0.0) > 90.0 for d in stats.get("disk", []))
+            gpu_threshold = settings.get_float("gpu_temp_threshold", 85.0)
+            gpu_hot = any(
+                (g.get("temperature") or 0.0) > gpu_threshold for g in stats.get("gpu", [])
+            )
             now = time.time()
-            if (cpu > 90.0 or disk_high) and (now - last_alert >= 60.0):
+            if (cpu > 90.0 or disk_high or gpu_hot) and (now - last_alert >= 60.0):
                 last_alert = now
                 if cpu > 90.0:
                     title = "CPU 使用率过高"
                     message = f"CPU 使用率已达到 {cpu:.1f}%"
-                else:
+                elif disk_high:
                     title = "磁盘空间不足"
                     message = "有磁盘分区使用率超过 90%"
+                else:
+                    title = "GPU 温度过高"
+                    message = f"有 GPU 温度超过 {gpu_threshold:.0f}°C"
                 publish("system_alert", {"title": title, "message": message})
         except Exception:  # noqa: BLE001
             logger.exception("system monitor tick failed")

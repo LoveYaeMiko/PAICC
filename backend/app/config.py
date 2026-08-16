@@ -39,6 +39,7 @@ DEFAULTS: dict[str, Any] = {
     "knowledge_threshold": "0.5",
     "search_api_provider": "",
     "search_api_key": "",
+    "embedding_model": "BAAI/bge-small-zh-v1.5",
     # Email
     "smtp_host": "",
     "smtp_port": "465",

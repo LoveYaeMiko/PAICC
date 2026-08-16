@@ -15,6 +15,9 @@ from app.config import settings
 #: Extensions the fallback scanner will actually read.
 _TEXT_EXTS = {".txt", ".md", ".csv", ".json", ".py", ".yaml", ".yml", ".log"}
 
+#: PDF extension handled by the optional ``pypdf`` fallback reader.
+_PDF_EXT = ".pdf"
+
 _FALLBACK_MAX_FILES = 2000
 _FALLBACK_MAX_DEPTH = 4
 _READ_CAP = 2_000_000  # bytes
@@ -79,13 +82,14 @@ def _search_fallback(query: str, top: int) -> dict[str, Any]:
             if depth >= _FALLBACK_MAX_DEPTH:
                 dirnames[:] = []
             for fn in filenames:
-                if os.path.splitext(fn)[1].lower() not in _TEXT_EXTS:
+                ext = os.path.splitext(fn)[1].lower()
+                if ext not in _TEXT_EXTS and ext != _PDF_EXT:
                     continue
                 files_seen += 1
                 if files_seen > _FALLBACK_MAX_FILES:
                     return {"ok": True, "results": matches[:top]}
                 fp = os.path.join(dirpath, fn)
-                text = _read_text(fp)
+                text = _read_pdf_text(fp) if ext == _PDF_EXT else _read_text(fp)
                 if text is None:
                     continue
                 idx = text.lower().find(ql)
@@ -110,6 +114,26 @@ def _read_text(path: str) -> str | None:
         with open(path, "r", encoding="utf-8", errors="ignore") as fh:
             return fh.read(_READ_CAP)
     except OSError:
+        return None
+
+
+def _read_pdf_text(path: str) -> str | None:
+    """Extract text from a PDF via ``pypdf`` (lazy import; None if unavailable/fails)."""
+    try:
+        from pypdf import PdfReader  # type: ignore
+    except ImportError:
+        return None
+    try:
+        reader = PdfReader(path)
+        chunks: list[str] = []
+        for page in reader.pages:
+            try:
+                chunks.append(page.extract_text() or "")
+            except Exception:  # noqa: BLE001
+                continue
+        text = "\n".join(chunks)
+        return text[:_READ_CAP] if text else None
+    except Exception:  # noqa: BLE001
         return None
 
 

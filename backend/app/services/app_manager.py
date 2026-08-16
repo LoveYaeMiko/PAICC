@@ -243,6 +243,23 @@ def list_apps(favorites_only: bool = False) -> list[dict[str, Any]]:
     return rows
 
 
+def recommend_apps(limit: int = 8) -> list[dict[str, Any]]:
+    """Return the apps the user has launched, most-used first.
+
+    Only apps with a positive ``launch_count`` or a recorded ``last_launched``
+    timestamp are considered, ordered by usage frequency then recency.
+    """
+    rows = db.query(
+        "SELECT * FROM apps "
+        "WHERE launch_count > 0 OR last_launched > 0 "
+        "ORDER BY launch_count DESC, last_launched DESC LIMIT ?",
+        (limit,),
+    )
+    for row in rows:
+        row["is_favorite"] = bool(row["is_favorite"])
+    return rows
+
+
 def set_favorite(app_id: int, is_favorite: bool) -> dict[str, Any]:
     """Mark/unmark an application as a favorite."""
     db.execute(
@@ -258,8 +275,55 @@ def set_favorite(app_id: int, is_favorite: bool) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # Actions
 # --------------------------------------------------------------------------- #
+_SCRIPT_EXTS = {".py", ".bat", ".cmd", ".ps1", ".sh"}
+
+
+def _is_script(path: str) -> bool:
+    """Return True when ``path`` points to a script we can route through Claude Code."""
+    return Path(path).suffix.lower() in _SCRIPT_EXTS
+
+
+def _script_run_command(path: str) -> str:
+    """Build the shell command that executes the given script path."""
+    ext = Path(path).suffix.lower()
+    quoted = f'"{path}"'
+    if ext == ".py":
+        return f"python {quoted}"
+    if ext == ".ps1":
+        return f"powershell -NoProfile -ExecutionPolicy Bypass -File {quoted}"
+    if ext == ".sh":
+        return f"bash {quoted}"
+    return quoted  # .bat / .cmd run directly
+
+
+def _run_script_via_claude(path: str) -> bool:
+    """Ask Claude Code to run ``path`` one-shot via ``claude -p "<run command>"``.
+
+    Returns True when the one-shot CLI was spawned, False when the Claude CLI is
+    missing or the spawn failed (caller falls back to the native launcher).
+    """
+    from app.services import claude_code
+
+    claude = claude_code._resolve_claude()
+    if not claude:
+        return False
+    argv = [claude, "-p", _script_run_command(path)]
+    if os.name == "nt" and claude.lower().endswith((".cmd", ".bat")):
+        argv = ["cmd", "/c", " ".join(claude_code._cmd_escape_arg(a) for a in argv)]
+    try:
+        subprocess.Popen(argv)
+    except OSError:
+        return False
+    return True
+
+
 def start_app(app_id: int) -> dict[str, Any]:
-    """Launch the application at ``apps.path`` and update usage counters."""
+    """Launch the application at ``apps.path`` and update usage counters.
+
+    Script targets (``.py``/``.bat``/``.cmd``/``.ps1``/``.sh``) are handed to
+    Claude Code (``claude -p "<run command>"``) instead of the native launcher;
+    everything else uses ``os.startfile`` (Windows) or ``subprocess.Popen``.
+    """
     row = db.query_one("SELECT * FROM apps WHERE id = ?", (app_id,))
     if not row:
         return {"ok": False, "error": f"app {app_id} not found"}
@@ -268,17 +332,33 @@ def start_app(app_id: int) -> dict[str, Any]:
         result: dict[str, Any] = {"ok": False, "error": f"target not found: {path}"}
         db.log_operation("app_start", {"id": app_id, "name": row["name"]}, result)
         return result
-    if os.name == "nt" and hasattr(os, "startfile"):
-        os.startfile(path)
-    else:
-        subprocess.Popen([path])
+
+    launch_method = "native"
+    if _is_script(path) and _run_script_via_claude(path):
+        launch_method = "claude"
+    if launch_method != "claude":
+        if os.name == "nt" and hasattr(os, "startfile"):
+            os.startfile(path)
+        else:
+            subprocess.Popen([path])
+
     now = time.time()
     db.execute(
         "UPDATE apps SET launch_count = launch_count + 1, last_launched = ? WHERE id = ?",
         (now, app_id),
     )
-    result = {"ok": True, "id": app_id, "name": row["name"], "path": path}
-    db.log_operation("app_start", {"id": app_id, "name": row["name"], "path": path}, result)
+    result = {
+        "ok": True,
+        "id": app_id,
+        "name": row["name"],
+        "path": path,
+        "launch_method": launch_method,
+    }
+    db.log_operation(
+        "app_start",
+        {"id": app_id, "name": row["name"], "path": path, "launch_method": launch_method},
+        result,
+    )
     return result
 
 

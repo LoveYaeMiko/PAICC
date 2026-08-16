@@ -1,4 +1,11 @@
-import { PlayCircleOutlined, ReloadOutlined } from '@ant-design/icons'
+import {
+  FolderOpenOutlined,
+  PlayCircleOutlined,
+  ReloadOutlined,
+  SaveOutlined,
+  ScanOutlined,
+  StopOutlined,
+} from '@ant-design/icons'
 import {
   Button,
   Card,
@@ -7,6 +14,7 @@ import {
   Form,
   Input,
   Row,
+  Select,
   Space,
   Spin,
   Table,
@@ -27,6 +35,22 @@ import type {
   RedLineLevel,
   RedLineStatus,
 } from '@/types'
+
+interface DetectResult {
+  root_path: string
+  config_files: string[]
+  entry_points: string[]
+  log_dir: string | null
+  dashboard_script: string
+  has_simulation_dashboard: boolean
+}
+
+interface QuantConfig {
+  project_id: number
+  config_file: string
+  path: string
+  content: string
+}
 
 const LEVEL_COLOR: Record<RedLineLevel, string> = {
   ok: '#52c41a',
@@ -186,6 +210,14 @@ export default function QuantPage(): JSX.Element {
   const [logs, setLogs] = useState<string[]>([])
   const [logsLoading, setLogsLoading] = useState(true)
 
+  const [savingToKb, setSavingToKb] = useState(false)
+
+  const [configProjectId, setConfigProjectId] = useState<number | undefined>()
+  const [configContent, setConfigContent] = useState('')
+  const [configPath, setConfigPath] = useState('')
+  const [configLoading, setConfigLoading] = useState(false)
+  const [configSaving, setConfigSaving] = useState(false)
+
   const [form] = Form.useForm<{ root_path: string; name: string }>()
   const logRef = useRef<HTMLPreElement>(null)
 
@@ -269,13 +301,27 @@ export default function QuantPage(): JSX.Element {
     setLogs((prev) => [...prev, line])
   }, [])
 
+  const onQuantProcesses = useCallback((data: unknown) => {
+    if (Array.isArray(data)) {
+      setProcesses(data as QuantProcessInfo[])
+      setProcessesLoading(false)
+    }
+  }, [])
+
   useWsEvent('red_line_alert', onRedLineAlert)
   useWsEvent('log_line', onLogLine)
+  useWsEvent('quant_processes', onQuantProcesses)
 
   useEffect(() => {
     const el = logRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [logs])
+
+  useEffect(() => {
+    if (configProjectId == null && projects.length > 0) {
+      setConfigProjectId(projects[0].id)
+    }
+  }, [projects, configProjectId])
 
   const onCreateProject = async (values: { root_path: string; name: string }): Promise<void> => {
     try {
@@ -302,6 +348,105 @@ export default function QuantPage(): JSX.Element {
     }
   }
 
+  const handleStopCommand = async (projectId: number): Promise<void> => {
+    const confirmationId = await confirmOperation('stop_quant_command', '停止量化进程', {
+      project_id: projectId,
+    })
+    if (!confirmationId) return
+    try {
+      const { data } = await api.post<{ stopped: number[]; errors: number[] }>('/quant/stop', {
+        project_id: projectId,
+        confirmation_id: confirmationId,
+      })
+      notification.success({
+        message: '进程已停止',
+        description: data.stopped?.length ? `已停止 PID：${data.stopped.join(', ')}` : '无正在运行的进程',
+      })
+      await refreshProcesses()
+    } catch (err) {
+      notification.error({ message: '停止失败', description: describeError(err) })
+    }
+  }
+
+  const handleDetect = async (): Promise<void> => {
+    const values = form.getFieldsValue()
+    let rootPath = values.root_path?.trim()
+    if (!rootPath && projects.length > 0) rootPath = projects[0].root_path
+    if (!rootPath) {
+      notification.warning({ message: '请先输入项目根路径' })
+      return
+    }
+    try {
+      const { data } = await api.get<DetectResult>('/quant/detect', { params: { root_path: rootPath } })
+      notification.success({
+        message: '检测完成',
+        description: (
+          <div style={{ maxHeight: 240, overflow: 'auto' }}>
+            <p>根路径：{data.root_path}</p>
+            <p>配置文件：{data.config_files?.length ? data.config_files.join(', ') : '未找到'}</p>
+            <p>仪表盘脚本：{data.dashboard_script || '未找到'}</p>
+            <p>入口：{data.entry_points?.length ? data.entry_points.join(', ') : '未找到'}</p>
+            <p>日志目录：{data.log_dir ?? '未找到'}</p>
+            <p>模拟盘仪表盘：{data.has_simulation_dashboard ? '已检测到' : '未检测到'}</p>
+          </div>
+        ),
+      })
+    } catch (err) {
+      notification.error({ message: '检测失败', description: describeError(err) })
+    }
+  }
+
+  const loadConfig = async (): Promise<void> => {
+    setConfigLoading(true)
+    try {
+      const { data } = await api.get<QuantConfig>('/quant/config', {
+        params: { project_id: configProjectId },
+      })
+      setConfigContent(data.content ?? '')
+      setConfigPath(data.path ?? data.config_file ?? '')
+      notification.success({ message: '配置已加载', description: data.path })
+    } catch (err) {
+      notification.error({ message: '加载配置失败', description: describeError(err) })
+    } finally {
+      setConfigLoading(false)
+    }
+  }
+
+  const saveConfig = async (): Promise<void> => {
+    const confirmationId = await confirmOperation('save_quant_config', '保存量化配置文件', {
+      project_id: configProjectId,
+    })
+    if (!confirmationId) return
+    setConfigSaving(true)
+    try {
+      await api.post('/quant/config', {
+        project_id: configProjectId,
+        content: configContent,
+        confirmation_id: confirmationId,
+      })
+      notification.success({ message: '配置已保存', description: configPath })
+    } catch (err) {
+      notification.error({ message: '保存配置失败', description: describeError(err) })
+    } finally {
+      setConfigSaving(false)
+    }
+  }
+
+  const handleSaveToKb = async (): Promise<void> => {
+    if (!status) return
+    const title = `量化红线报告 ${formatTime(status.timestamp)}`
+    const content = buildStatusReport(status)
+    setSavingToKb(true)
+    try {
+      await api.post('/quant/save-report', { title, content })
+      notification.success({ message: '已保存到知识库', description: title })
+    } catch (err) {
+      notification.error({ message: '保存失败', description: describeError(err) })
+    } finally {
+      setSavingToKb(false)
+    }
+  }
+
   const commandColumns: TableColumnsType<QuantCommand> = [
     { title: '名称', dataIndex: 'name', key: 'name' },
     {
@@ -322,17 +467,26 @@ export default function QuantPage(): JSX.Element {
     {
       title: '操作',
       key: 'action',
-      width: 100,
+      width: 180,
       render: (_, record) => (
-        <Button
-          size="small"
-          type="primary"
-          danger
-          icon={<PlayCircleOutlined />}
-          onClick={() => void handleRunCommand(record)}
-        >
-          运行
-        </Button>
+        <Space size={4}>
+          <Button
+            size="small"
+            type="primary"
+            danger
+            icon={<PlayCircleOutlined />}
+            onClick={() => void handleRunCommand(record)}
+          >
+            运行
+          </Button>
+          <Button
+            size="small"
+            icon={<StopOutlined />}
+            onClick={() => void handleStopCommand(record.project_id)}
+          >
+            停止
+          </Button>
+        </Space>
       ),
     },
   ]
@@ -342,9 +496,20 @@ export default function QuantPage(): JSX.Element {
       <Card
         title="红线仪表盘"
         extra={
-          <Button size="small" icon={<ReloadOutlined />} onClick={() => void refreshStatus()}>
-            刷新
-          </Button>
+          <Space size={8}>
+            <Button
+              size="small"
+              icon={<SaveOutlined />}
+              disabled={!status}
+              loading={savingToKb}
+              onClick={() => void handleSaveToKb()}
+            >
+              保存到知识库
+            </Button>
+            <Button size="small" icon={<ReloadOutlined />} onClick={() => void refreshStatus()}>
+              刷新
+            </Button>
+          </Space>
         }
       >
         {statusLoading ? (
@@ -389,9 +554,14 @@ export default function QuantPage(): JSX.Element {
             <Input placeholder="项目名称" style={{ width: 180 }} />
           </Form.Item>
           <Form.Item>
-            <Button type="primary" htmlType="submit">
-              注册
-            </Button>
+            <Space size={8}>
+              <Button type="primary" htmlType="submit">
+                注册
+              </Button>
+              <Button icon={<ScanOutlined />} onClick={() => void handleDetect()}>
+                检测项目
+              </Button>
+            </Space>
           </Form.Item>
         </Form>
         {projectsLoading ? (
@@ -493,6 +663,55 @@ export default function QuantPage(): JSX.Element {
           </pre>
         )}
       </Card>
+
+      <Card
+        title="配置文件编辑器"
+        extra={
+          <Space size={8}>
+            <Button
+              size="small"
+              icon={<FolderOpenOutlined />}
+              loading={configLoading}
+              onClick={() => void loadConfig()}
+            >
+              加载
+            </Button>
+            <Button
+              size="small"
+              type="primary"
+              icon={<SaveOutlined />}
+              loading={configSaving}
+              onClick={() => void saveConfig()}
+            >
+              保存
+            </Button>
+          </Space>
+        }
+      >
+        <Space direction="vertical" style={{ width: '100%' }} size={8}>
+          <Select<number>
+            placeholder="选择项目"
+            style={{ width: 320 }}
+            value={configProjectId}
+            onChange={(v) => setConfigProjectId(v)}
+            options={projects.map((p) => ({ label: p.name, value: p.id }))}
+          />
+          {configPath ? (
+            <Typography.Text type="secondary" className="mono" style={{ fontSize: 12 }}>
+              {configPath}
+            </Typography.Text>
+          ) : null}
+          <Input.TextArea
+            className="mono"
+            value={configContent}
+            onChange={(e) => setConfigContent(e.target.value)}
+            rows={16}
+            spellCheck={false}
+            placeholder="选择项目后点击「加载」读取配置文件"
+            style={{ fontSize: 12, lineHeight: 1.5 }}
+          />
+        </Space>
+      </Card>
     </div>
   )
 }
@@ -507,4 +726,22 @@ function normalizeLogs(data: unknown): string[] {
     if (Array.isArray(candidate)) return candidate.map((l) => String(l))
   }
   return []
+}
+
+function buildStatusReport(status: RedLineStatus): string {
+  const lines: string[] = []
+  lines.push('# 量化红线报告')
+  lines.push('')
+  lines.push(`- 总体状态：${LEVEL_LABEL[status.overall] ?? status.overall}`)
+  lines.push(`- 时间：${formatTime(status.timestamp)}`)
+  lines.push('')
+  lines.push('## 红线指标')
+  for (const rl of status.red_lines ?? []) {
+    const label = rl.label ?? rl.name
+    const level = LEVEL_LABEL[rl.level] ?? rl.level
+    const value = rl.value == null ? '—' : String(rl.value)
+    const detail = rl.detail ? ` — ${rl.detail}` : ''
+    lines.push(`- ${label}：${level}（${value}）${detail}`)
+  }
+  return lines.join('\n')
 }

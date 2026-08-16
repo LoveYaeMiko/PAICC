@@ -1,4 +1,4 @@
-import { DeleteOutlined, ImportOutlined, ReloadOutlined } from '@ant-design/icons'
+import { DeleteOutlined, ImportOutlined, ReloadOutlined, SaveOutlined } from '@ant-design/icons'
 import {
   Button,
   Card,
@@ -67,6 +67,7 @@ export default function ResearchPage(): JSX.Element {
   const [topic, setTopic] = useState('')
   const [reportContent, setReportContent] = useState('')
   const [generating, setGenerating] = useState(false)
+  const [savingToKb, setSavingToKb] = useState(false)
 
   const refreshDocs = useCallback(async (): Promise<void> => {
     try {
@@ -161,6 +162,20 @@ export default function ResearchPage(): JSX.Element {
     }
   }
 
+  const handleSaveToKb = async (): Promise<void> => {
+    if (!reportContent) return
+    const title = topic.trim() || '研究报告'
+    setSavingToKb(true)
+    try {
+      await api.post('/quant/save-report', { title, content: reportContent })
+      notification.success({ message: '已保存到知识库', description: title })
+    } catch (err) {
+      notification.error({ message: '保存失败', description: describeError(err) })
+    } finally {
+      setSavingToKb(false)
+    }
+  }
+
   const docColumns: TableColumnsType<ResearchDoc> = [
     { title: '标题', dataIndex: 'title', key: 'title', ellipsis: true },
     {
@@ -202,7 +217,7 @@ export default function ResearchPage(): JSX.Element {
         <Space direction="vertical" style={{ width: '100%' }} size={12}>
           <Space.Compact style={{ width: '100%' }}>
             <Input
-              placeholder="输入文档文件路径"
+              placeholder="输入文档文件路径或网页 URL（http/https）"
               value={filePath}
               onChange={(e) => setFilePath(e.target.value)}
               onPressEnter={() => void handleIngestPath()}
@@ -217,7 +232,7 @@ export default function ResearchPage(): JSX.Element {
             </Button>
           </Space.Compact>
           <Input.TextArea
-            placeholder="或粘贴原始文本内容后导入"
+            placeholder="或粘贴原始文本内容或网页 URL 后导入"
             value={rawText}
             autoSize={{ minRows: 3, maxRows: 6 }}
             onChange={(e) => setRawText(e.target.value)}
@@ -330,23 +345,35 @@ export default function ResearchPage(): JSX.Element {
         </Button>
       </Space.Compact>
       {reportContent ? (
-        <pre
-          className="mono"
-          style={{
-            margin: 0,
-            padding: 16,
-            background: '#0b0d11',
-            border: '1px solid #262b36',
-            borderRadius: 8,
-            whiteSpace: 'pre-wrap',
-            wordBreak: 'break-word',
-            maxHeight: 520,
-            overflow: 'auto',
-            lineHeight: 1.6,
-          }}
-        >
-          {reportContent}
-        </pre>
+        <>
+          <div>
+            <Button
+              type="primary"
+              icon={<SaveOutlined />}
+              loading={savingToKb}
+              onClick={() => void handleSaveToKb()}
+            >
+              保存到知识库
+            </Button>
+          </div>
+          <pre
+            className="mono"
+            style={{
+              margin: 0,
+              padding: 16,
+              background: '#0b0d11',
+              border: '1px solid #262b36',
+              borderRadius: 8,
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+              maxHeight: 520,
+              overflow: 'auto',
+              lineHeight: 1.6,
+            }}
+          >
+            {reportContent}
+          </pre>
+        </>
       ) : (
         <Empty description="输入主题后生成研究报告" />
       )}

@@ -13,6 +13,14 @@ from typing import Any
 
 from app.config import settings
 
+#: Date-modified preset names -> Everything ``dm:`` filters.
+_TIME_FILTERS: dict[str, str] = {
+    "today": "dm:today",
+    "week": "dm:lastweek",
+    "month": "dm:lastmonth",
+    "year": "dm:thisyear",
+}
+
 #: Semantic file-type names -> Everything ``ext:`` filter groups.
 _TYPE_EXTS: dict[str, str] = {
     "image": "jpg;jpeg;png;gif;bmp;webp;svg;ico;tif;tiff",
@@ -38,6 +46,7 @@ def search(
     size_min: int | None = None,
     size_max: int | None = None,
     limit: int = 50,
+    time: str | None = None,
 ) -> dict[str, Any]:
     """Search for files by name.
 
@@ -61,6 +70,10 @@ def search(
         args.append(f"size:>{int(size_min)}mb")
     if size_max is not None:
         args.append(f"size:<{int(size_max)}mb")
+    if time:
+        dm = _TIME_FILTERS.get((time or "").strip().lower())
+        if dm:
+            args.append(dm)
 
     try:
         proc = subprocess.run(

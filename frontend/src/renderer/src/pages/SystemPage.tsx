@@ -8,6 +8,7 @@ import {
   Select,
   Spin,
   Statistic,
+  Switch,
   Table,
   Tag,
   notification,
@@ -18,7 +19,7 @@ import { api } from '@/services/api'
 import { confirmOperation } from '@/services/confirm'
 import { useWsEvent } from '@/services/ws'
 import { useSystemStore } from '@/store/useSystemStore'
-import type { GpuInfo, ProcessInfo, SystemStats } from '@/types'
+import type { GpuInfo, ProcessInfo, StartupItem, SystemStats } from '@/types'
 
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return '0 B'
@@ -79,6 +80,10 @@ export default function SystemPage(): JSX.Element {
   const [powerLoading, setPowerLoading] = useState(false)
   const [powerPlans, setPowerPlans] = useState<string[]>([])
   const [powerPlan, setPowerPlan] = useState<string | undefined>(undefined)
+  const [processSort, setProcessSort] = useState('cpu')
+  const [startupItems, setStartupItems] = useState<StartupItem[]>([])
+  const [startupLoading, setStartupLoading] = useState(false)
+  const [startupToggling, setStartupToggling] = useState<string | null>(null)
 
   const loadStatus = useCallback(async () => {
     try {
@@ -116,11 +121,24 @@ export default function SystemPage(): JSX.Element {
     }
   }, [])
 
+  const loadStartupItems = useCallback(async () => {
+    setStartupLoading(true)
+    try {
+      const res = await api.get<unknown>('/system/startup-items')
+      setStartupItems(res.data as StartupItem[])
+    } catch (e) {
+      notification.error({ message: '获取开机启动项失败', description: errMsg(e) })
+    } finally {
+      setStartupLoading(false)
+    }
+  }, [])
+
   useEffect(() => {
     void loadStatus()
     void loadProcesses()
     void loadPowerPlans()
-  }, [loadStatus, loadProcesses, loadPowerPlans])
+    void loadStartupItems()
+  }, [loadStatus, loadProcesses, loadPowerPlans, loadStartupItems])
 
   const onSystemStats = useCallback(
     (data: unknown) => {
@@ -158,6 +176,44 @@ export default function SystemPage(): JSX.Element {
     }
   }
 
+  const changeProcessSort = (sort: string): void => {
+    setProcessSort(sort)
+    void loadProcesses(sort)
+  }
+
+  const revealProcess = async (proc: ProcessInfo): Promise<void> => {
+    try {
+      await api.post(`/system/process/${proc.pid}/reveal`)
+      notification.success({ message: '已在资源管理器中定位', description: proc.exe || proc.name })
+    } catch (e) {
+      notification.error({ message: '定位文件失败', description: errMsg(e) })
+    }
+  }
+
+  const toggleStartup = async (item: StartupItem, enabled: boolean): Promise<void> => {
+    setStartupToggling(item.name)
+    try {
+      const res = await api.post<{ ok?: boolean; message?: string }>('/system/startup/toggle', {
+        name: item.name,
+        enabled,
+      })
+      const data = res.data
+      if (data && data.ok === false) {
+        notification.warning({ message: '启动项未变更', description: data.message ?? item.name })
+      } else {
+        notification.success({
+          message: enabled ? '启动项已启用' : '启动项已禁用',
+          description: item.name,
+        })
+      }
+      await loadStartupItems()
+    } catch (e) {
+      notification.error({ message: '切换启动项失败', description: errMsg(e) })
+    } finally {
+      setStartupToggling(null)
+    }
+  }
+
   const processColumns: ColumnsType<ProcessInfo> = [
     { title: 'PID', dataIndex: 'pid', key: 'pid', width: 90, sorter: (a, b) => a.pid - b.pid },
     { title: '进程名', dataIndex: 'name', key: 'name', ellipsis: true },
@@ -178,6 +234,13 @@ export default function SystemPage(): JSX.Element {
       render: (v: number) => v.toFixed(1),
     },
     {
+      title: '磁盘读',
+      dataIndex: 'disk_read_bytes',
+      key: 'disk_read_bytes',
+      width: 120,
+      render: (v: number | undefined) => (v == null ? '—' : formatBytes(v)),
+    },
+    {
       title: '状态',
       dataIndex: 'status',
       key: 'status',
@@ -191,16 +254,62 @@ export default function SystemPage(): JSX.Element {
     {
       title: '操作',
       key: 'action',
-      width: 90,
+      width: 160,
       render: (_: unknown, record: ProcessInfo) => (
-        <Button danger size="small" onClick={() => void killProcess(record)}>
-          结束
-        </Button>
+        <div style={{ display: 'flex', gap: 4 }}>
+          {record.exe && (
+            <Button size="small" onClick={() => void revealProcess(record)}>
+              定位
+            </Button>
+          )}
+          <Button danger size="small" onClick={() => void killProcess(record)}>
+            结束
+          </Button>
+        </div>
+      ),
+    },
+  ]
+
+  const startupColumns: ColumnsType<StartupItem> = [
+    { title: '名称', dataIndex: 'name', key: 'name', ellipsis: true },
+    {
+      title: '位置',
+      dataIndex: 'location',
+      key: 'location',
+      width: 90,
+      render: (v: string) => <Tag>{v}</Tag>,
+    },
+    {
+      title: '来源',
+      dataIndex: 'source',
+      key: 'source',
+      width: 100,
+      render: (v: string) => <Tag color={v === '注册表' ? 'blue' : 'default'}>{v}</Tag>,
+    },
+    {
+      title: '命令',
+      dataIndex: 'command',
+      key: 'command',
+      ellipsis: true,
+      render: (v: string) => <span className="mono">{v}</span>,
+    },
+    {
+      title: '启用',
+      key: 'enabled',
+      width: 80,
+      render: (_: unknown, record: StartupItem) => (
+        <Switch
+          size="small"
+          checked={record.enabled}
+          loading={startupToggling === record.name}
+          onChange={(checked) => void toggleStartup(record, checked)}
+        />
       ),
     },
   ]
 
   const diskPercent = stats && stats.disk.length > 0 ? stats.disk[0].percent : 0
+  const diskIO = stats?.disk_io ?? { read_bytes: 0, write_bytes: 0, read_per_sec: 0, write_per_sec: 0 }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -224,6 +333,16 @@ export default function SystemPage(): JSX.Element {
             <Col xs={12} sm={8} md={6} xl={4}>
               <Card className="stat-card" size="small">
                 <Statistic title="磁盘" value={diskPercent} suffix="%" precision={1} />
+              </Card>
+            </Col>
+            <Col xs={12} sm={8} md={6} xl={4}>
+              <Card className="stat-card" size="small">
+                <Statistic title="磁盘读取" value={`${formatBytes(diskIO.read_per_sec)}/s`} />
+              </Card>
+            </Col>
+            <Col xs={12} sm={8} md={6} xl={4}>
+              <Card className="stat-card" size="small">
+                <Statistic title="磁盘写入" value={`${formatBytes(diskIO.write_per_sec)}/s`} />
               </Card>
             </Col>
             <Col xs={12} sm={8} md={6} xl={4}>
@@ -319,7 +438,23 @@ export default function SystemPage(): JSX.Element {
         />
       </Card>
 
-      <Card title="进程列表" size="small">
+      <Card
+        title="进程列表"
+        size="small"
+        extra={
+          <Select
+            value={processSort}
+            style={{ width: 120 }}
+            options={[
+              { value: 'cpu', label: 'CPU' },
+              { value: 'memory', label: '内存' },
+              { value: 'name', label: '名称' },
+              { value: 'disk', label: '磁盘' },
+            ]}
+            onChange={changeProcessSort}
+          />
+        }
+      >
         <Table
           rowKey="pid"
           columns={processColumns}
@@ -327,6 +462,18 @@ export default function SystemPage(): JSX.Element {
           loading={processLoading}
           size="small"
           pagination={{ pageSize: 10, showSizeChanger: true, showTotal: (total) => `共 ${total} 个进程` }}
+          scroll={{ x: 840 }}
+        />
+      </Card>
+
+      <Card title="开机启动项" size="small">
+        <Table
+          rowKey={(record: StartupItem) => `${record.source}-${record.location}-${record.name}`}
+          columns={startupColumns}
+          dataSource={startupItems}
+          loading={startupLoading}
+          size="small"
+          pagination={false}
           scroll={{ x: 720 }}
         />
       </Card>

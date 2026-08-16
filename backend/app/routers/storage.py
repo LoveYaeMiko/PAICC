@@ -71,7 +71,7 @@ def list_cleanable_items() -> list[dict[str, Any]]:
 @router.post("/clean")
 def clean_items(req: CleanRequest) -> dict[str, Any]:
     """Delete the given cleanable items (requires an approved confirmation)."""
-    require_confirmation(req.confirmation_id)
+    require_confirmation(req.confirmation_id, action="clean")
     result = storage_analysis.clean_items(req.items)
     db.log_operation("storage_clean", {"items": req.items}, result)
     ws.publish("storage_cleaned", result)

@@ -54,7 +54,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
   approveConfirmation: async () => {
     const conf = get().pendingConfirmation
     if (!conf) return
-    await api.post(`/confirmations/${conf.confirmation_id}/approve`)
+    try {
+      await api.post(`/confirmations/${conf.confirmation_id}/approve`)
+    } catch {
+      // The confirmation expired or was already consumed — close the modal and
+      // tell the user rather than leaving it stuck open.
+      set({
+        pendingConfirmation: null,
+        messages: [...get().messages, { role: 'assistant', content: '确认已过期或无效，请重新发起该操作。' }],
+      })
+      return
+    }
     set({ pendingConfirmation: null })
 
     // Re-send the original history (which now ends at the user request, since the
@@ -86,8 +96,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
   denyConfirmation: async () => {
     const conf = get().pendingConfirmation
     if (!conf) return
-    await api.post(`/confirmations/${conf.confirmation_id}/deny`)
+    // Close the modal immediately — even if the backend already expired the
+    // confirmation (deny then 404s), the UI must not stay stuck open.
     set({ pendingConfirmation: null })
+    try {
+      await api.post(`/confirmations/${conf.confirmation_id}/deny`)
+    } catch {
+      // The backend may have already expired it; the modal is closed regardless.
+    }
   },
 
   clear: () => set({ messages: [], pendingConfirmation: null, lastToolCalls: [] }),

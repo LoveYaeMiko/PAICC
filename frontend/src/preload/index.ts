@@ -15,6 +15,8 @@ const api = {
   showMain: (): void => ipcRenderer.send('paicc:show-main'),
   openExternal: (url: string): void => ipcRenderer.send('paicc:open-external', url),
   openRoute: (route: string): void => ipcRenderer.send('paicc:open-route', route),
+  getAutoLaunch: (): Promise<boolean> => ipcRenderer.invoke('paicc:get-auto-launch'),
+  setAutoLaunch: (v: boolean): Promise<boolean> => ipcRenderer.invoke('paicc:set-auto-launch', v),
   onNavigate: (cb: (route: string) => void): void => {
     ipcRenderer.on('paicc:navigate', (_e, route) => cb(route))
   },

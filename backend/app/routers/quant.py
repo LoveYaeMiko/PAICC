@@ -17,6 +17,7 @@ class RegisterProjectRequest(BaseModel):
     name: str
     root_path: str
     config_file: str | None = None
+    dashboard_script: str | None = None
     log_dir: str | None = None
 
 
@@ -33,6 +34,22 @@ class RunCommandRequest(BaseModel):
     confirmation_id: str | None = None
 
 
+class StopCommandRequest(BaseModel):
+    project_id: int | None = None
+    confirmation_id: str | None = None
+
+
+class SaveConfigRequest(BaseModel):
+    project_id: int | None = None
+    content: str
+    confirmation_id: str | None = None
+
+
+class SaveReportRequest(BaseModel):
+    title: str
+    content: str
+
+
 @router.get("/projects")
 def list_projects() -> list[dict[str, Any]]:
     return quant_manager.list_projects()
@@ -44,6 +61,7 @@ def register_project(payload: RegisterProjectRequest) -> dict[str, Any]:
         name=payload.name,
         root_path=payload.root_path,
         config_file=payload.config_file,
+        dashboard_script=payload.dashboard_script,
         log_dir=payload.log_dir,
     )
 
@@ -83,7 +101,7 @@ def add_command(payload: AddCommandRequest) -> dict[str, Any]:
 
 @router.post("/command")
 def run_command(payload: RunCommandRequest) -> dict[str, Any]:
-    require_confirmation(payload.confirmation_id)
+    require_confirmation(payload.confirmation_id, action="run_quant_command")
     try:
         return quant_manager.run_command(
             command_id=payload.command_id,
@@ -94,6 +112,35 @@ def run_command(payload: RunCommandRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/stop")
+def stop_command(payload: StopCommandRequest) -> dict[str, Any]:
+    require_confirmation(payload.confirmation_id, action="stop_quant_command")
+    return quant_manager.stop_command(project_id=payload.project_id)
+
+
+@router.get("/config")
+def get_config(project_id: int | None = None) -> dict[str, Any]:
+    try:
+        return quant_manager.get_config_text(project_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/config")
+def save_config(payload: SaveConfigRequest) -> dict[str, Any]:
+    require_confirmation(payload.confirmation_id, action="save_quant_config")
+    try:
+        return quant_manager.save_config(payload.project_id, payload.content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/save-report")
+def save_report(payload: SaveReportRequest) -> dict[str, Any]:
+    """Save a report/result into the knowledge base."""
+    return quant_manager.save_report_to_kb(payload.title, payload.content)
 
 
 @router.get("/logs")

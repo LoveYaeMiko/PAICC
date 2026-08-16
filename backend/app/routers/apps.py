@@ -35,6 +35,12 @@ def list_apps(favorites_only: bool = False) -> list[dict[str, Any]]:
     return app_manager.list_apps(favorites_only)
 
 
+@router.get("/recommend")
+def recommend_apps(limit: int = 8) -> list[dict[str, Any]]:
+    """Return the most-launched apps for the recommendation section."""
+    return app_manager.recommend_apps(limit)
+
+
 @router.post("/scan")
 async def scan_apps() -> dict[str, Any]:
     """Scan Start Menu / Desktop shortcuts and registry uninstall entries."""
@@ -48,7 +54,7 @@ def start_app(req: StartRequest) -> dict[str, Any]:
 
 @router.post("/uninstall")
 def uninstall_app(req: UninstallRequest) -> dict[str, Any]:
-    require_confirmation(req.confirmation_id)
+    require_confirmation(req.confirmation_id, action="uninstall")
     return app_manager.uninstall_app(req.id, req.confirmation_id)
 
 

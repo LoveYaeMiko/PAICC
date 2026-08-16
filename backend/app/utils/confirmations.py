@@ -53,12 +53,19 @@ class ConfirmationManager:
             item["status"] = status
             return True
 
-    def is_approved(self, cid: str) -> bool:
+    def is_approved(self, cid: str, action: str | None = None) -> bool:
         with self._lock:
             item = self._items.get(cid)
             if item is None or item["status"] != "approved":
                 return False
+            if action is not None and item.get("action") != action:
+                return False
             return time.time() <= item["expires_at"]
+
+    def consume(self, cid: str) -> None:
+        """Remove an approved confirmation so it cannot be replayed (single-use)."""
+        with self._lock:
+            self._items.pop(cid, None)
 
     def get(self, cid: str) -> dict[str, Any] | None:
         with self._lock:

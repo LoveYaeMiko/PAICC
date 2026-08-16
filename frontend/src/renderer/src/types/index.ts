@@ -30,6 +30,13 @@ export interface NetInfo {
   recv_per_sec: number
 }
 
+export interface DiskIOInfo {
+  read_bytes: number
+  write_bytes: number
+  read_per_sec: number
+  write_per_sec: number
+}
+
 export interface GpuInfo {
   name: string
   load: number
@@ -46,6 +53,7 @@ export interface SystemStats {
   memory: MemoryInfo
   disk: DiskUsage[]
   net: NetInfo
+  disk_io: DiskIOInfo
   gpu: GpuInfo[]
   uptime_seconds: number
 }
@@ -61,6 +69,16 @@ export interface ProcessInfo {
   exe: string
   cmdline: string
   status: string
+  disk_read_bytes?: number
+  disk_write_bytes?: number
+}
+
+export interface StartupItem {
+  name: string
+  command: string
+  location: string
+  source: string
+  enabled: boolean
 }
 
 export interface FileSearchResult {
@@ -201,4 +219,11 @@ export interface OperationLog {
 export interface ClaudeEvent {
   type: string
   [key: string]: unknown
+}
+
+export interface FolderNode {
+  name: string
+  path: string
+  size: number
+  children?: FolderNode[]
 }

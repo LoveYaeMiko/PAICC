@@ -15,12 +15,16 @@ are imported lazily so the core backend runs without them.
 """
 from __future__ import annotations
 
+import html
+import ipaddress
 import logging
 import os
 import re
+import socket
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin, urlparse
 
 from app import config, db
 from app.config import settings
@@ -74,12 +78,20 @@ def _ensure_store() -> dict[str, Any] | None:
 
 
 def _make_embedding_function() -> Any:
-    """Build a sentence-transformers embedding function, or ``None`` for Chroma default."""
+    """Build a sentence-transformers embedding function, or ``None`` for Chroma default.
+
+    The model is configurable via the ``embedding_model`` setting (env
+    ``PAICC_EMBEDDING_MODEL`` or the settings table). It defaults to a compact
+    Chinese-friendly model (``BAAI/bge-small-zh-v1.5``) per the blueprint.
+    """
     try:
         import sentence_transformers  # noqa: F401  (lazy heavy dependency)
         from chromadb.utils import embedding_functions
 
-        return embedding_functions.SentenceTransformerEmbeddingFunction()
+        model = str(settings.get("embedding_model", "BAAI/bge-small-zh-v1.5")).strip()
+        if not model:
+            model = "BAAI/bge-small-zh-v1.5"
+        return embedding_functions.SentenceTransformerEmbeddingFunction(model_name=model)
     except Exception as exc:  # noqa: BLE001
         logger.info("sentence-transformers embedding unavailable, using Chroma default: %s", exc)
         return None
@@ -141,6 +153,132 @@ def _title_from_text(text: str) -> str:
     return "Untitled"
 
 
+def _strip_html(raw: str) -> str:
+    """Strip ``<script>``/``<style>`` blocks and remaining tags, then unescape entities."""
+    raw = raw or ""
+    raw = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", raw)
+    raw = re.sub(r"(?s)<[^>]+>", " ", raw)
+    text = html.unescape(raw)
+    text = re.sub(r"[ \t\f\v]+", " ", text)
+    text = re.sub(r"[ \t]*\n[ \t]*", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _title_from_html(raw: str) -> str:
+    """Extract a title from the ``<title>`` tag, if present."""
+    match = re.search(r"(?is)<title[^>]*>(.*?)</title>", raw or "")
+    if not match:
+        return ""
+    title = html.unescape(re.sub(r"(?s)<[^>]+>", "", match.group(1))).strip()
+    return title[:200] if title else ""
+
+
+#: Cap on the number of bytes read from a fetched URL (SSRF/DoS guard).
+MAX_FETCH_BYTES = 2 * 1024 * 1024
+_MAX_REDIRECTS = 5
+
+
+def _is_private_host(host: str) -> bool:
+    """Resolve ``host`` and reject loopback/private/link-local/reserved addresses."""
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return True
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if (
+            ip.is_loopback
+            or ip.is_private
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            return True
+    return False
+
+
+def _validate_public_url(url: str) -> str:
+    """Return an error string if ``url`` is not an http(s) public URL, else ``""``."""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return "invalid URL"
+    if parsed.scheme not in ("http", "https"):
+        return "only http/https URLs are allowed"
+    host = parsed.hostname
+    if not host:
+        return "invalid URL"
+    if _is_private_host(host):
+        return "private/internal hosts are not allowed"
+    return ""
+
+
+def _fetch_url_text(url: str) -> dict[str, Any]:
+    """Fetch a web page and extract its plain text plus a derived title.
+
+    SSRF guard: only public http(s) hosts are allowed (loopback/private/link-local/
+    reserved addresses are rejected), every redirect hop is re-validated, and the
+    response body is streamed with a byte cap.
+    """
+    err = _validate_public_url(url)
+    if err:
+        return {"ok": False, "error": err}
+    try:
+        import httpx
+    except ImportError as exc:  # pragma: no cover
+        return {"ok": False, "error": f"httpx unavailable: {exc}"}
+
+    resp: Any = None
+    current = url
+    for _ in range(_MAX_REDIRECTS):
+        err = _validate_public_url(current)
+        if err:
+            return {"ok": False, "error": err}
+        try:
+            resp = httpx.stream("GET", current, timeout=15.0, follow_redirects=False)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"failed to fetch URL: {exc}"}
+        if resp.status_code in (301, 302, 303, 307, 308):
+            location = resp.headers.get("location")
+            resp.close()
+            if not location:
+                return {"ok": False, "error": "redirect without location"}
+            current = urljoin(current, location)
+            continue
+        try:
+            resp.raise_for_status()
+        except Exception as exc:  # noqa: BLE001
+            resp.close()
+            return {"ok": False, "error": f"failed to fetch URL: {exc}"}
+        break
+    else:
+        return {"ok": False, "error": "too many redirects"}
+
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        with resp:
+            for chunk in resp.iter_bytes():
+                if total >= MAX_FETCH_BYTES:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"failed to read response: {exc}"}
+
+    raw = b"".join(chunks).decode("utf-8", errors="replace")
+    text = _strip_html(raw)
+    if not text:
+        return {"ok": False, "error": "no extractable content from URL"}
+    title = _title_from_html(raw) or _title_from_text(text)
+    return {"ok": True, "title": title, "text": text}
+
+
 def _persist_raw_text(title: str, text: str) -> str:
     """Persist raw (non-file) text so keyword fallback can re-read it later."""
     try:
@@ -188,29 +326,21 @@ def _make_snippet(text: str, query: str, width: int = SNIPPET_WIDTH) -> str:
 # --------------------------------------------------------------------------- #
 # Ingest / list / delete
 # --------------------------------------------------------------------------- #
-def ingest(source: str) -> dict[str, Any]:
-    """Ingest a file path or raw text into the knowledge base."""
-    if not isinstance(source, str) or not source.strip():
-        return {"ok": False, "error": "empty source"}
+def ingest_text(title: str, text: str, file_path: str | None = None) -> dict[str, Any]:
+    """Persist and index a titled raw-text document into the knowledge base.
 
-    source = source.strip()
-    if os.path.isfile(source):
-        file_path = str(Path(source).resolve())
-        title = os.path.splitext(os.path.basename(source))[0] or "Untitled"
-        try:
-            text = _read_file_text(file_path)
-        except Exception as exc:  # noqa: BLE001 — e.g. pypdf not installed
-            return {"ok": False, "error": f"failed to read document: {exc}"}
-        is_file = True
-    else:
-        text = source
-        title = _title_from_text(text)
-        file_path = _persist_raw_text(title, text)
-        is_file = False
-
+    This is the reusable core of :func:`ingest` (and is also called by the
+    ``save_to_knowledge_base`` tool and ``quant_manager.save_report_to_kb``).
+    When ``file_path`` is ``None`` the text is persisted to a copy under
+    ``research_docs`` so the keyword fallback can re-read it later.
+    """
+    title = (title or "").strip() or _title_from_text(text)
     text = (text or "").strip()
     if not text:
         return {"ok": False, "error": "no extractable content"}
+
+    if file_path is None:
+        file_path = _persist_raw_text(title, text)
 
     chunks = _chunk_text(text)
     doc_id = db.execute(
@@ -232,12 +362,60 @@ def ingest(source: str) -> dict[str, Any]:
         except Exception as exc:  # noqa: BLE001
             logger.warning("chroma add failed for doc %s: %s", doc_id, exc)
 
+    return {
+        "ok": True,
+        "title": title,
+        "chunk_count": len(chunks),
+        "doc_id": doc_id,
+        "file_path": file_path,
+    }
+
+
+def ingest(source: str) -> dict[str, Any]:
+    """Ingest a file path, URL, or raw text into the knowledge base."""
+    if not isinstance(source, str) or not source.strip():
+        return {"ok": False, "error": "empty source"}
+
+    source = source.strip()
+    is_file = False
+    file_path: str | None = None
+
+    if source.startswith(("http://", "https://")):
+        fetched = _fetch_url_text(source)
+        if not fetched.get("ok"):
+            return fetched
+        title = fetched["title"]
+        text = fetched["text"]
+    elif os.path.isfile(source):
+        is_file = True
+        title = os.path.splitext(os.path.basename(source))[0] or "Untitled"
+        try:
+            text = _read_file_text(str(Path(source).resolve()))
+        except Exception as exc:  # noqa: BLE001 — e.g. pypdf not installed
+            return {"ok": False, "error": f"failed to read document: {exc}"}
+        file_path = str(Path(source).resolve())
+    else:
+        title = _title_from_text(source)
+        text = source
+
+    result = ingest_text(title, text, file_path)
+    if not result.get("ok"):
+        return result
+
     db.log_operation(
         "research_ingest",
         {"source": source, "is_file": is_file},
-        {"doc_id": doc_id, "title": title, "chunk_count": len(chunks)},
+        {
+            "doc_id": result.get("doc_id"),
+            "title": result.get("title"),
+            "chunk_count": result.get("chunk_count"),
+        },
     )
-    return {"ok": True, "title": title, "chunk_count": len(chunks)}
+    return {
+        "ok": True,
+        "title": result.get("title"),
+        "chunk_count": result.get("chunk_count"),
+    }
 
 
 def list_documents() -> list[dict[str, Any]]:

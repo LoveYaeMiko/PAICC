@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from app.deps import require_confirmation
 from app.services import knowledge_base
 
 router = APIRouter(prefix="/research", tags=["research"])
@@ -42,8 +43,9 @@ def list_documents() -> list[dict[str, Any]]:
 
 
 @router.delete("/documents/{doc_id}")
-def delete_document(doc_id: int) -> dict[str, Any]:
-    """Delete a document from the knowledge base."""
+def delete_document(doc_id: int, confirmation_id: str | None = None) -> dict[str, Any]:
+    """Delete a document from the knowledge base (requires an approved confirmation)."""
+    require_confirmation(confirmation_id, action="delete_research_document")
     result = knowledge_base.delete_document(doc_id)
     if not result.get("ok"):
         raise HTTPException(status_code=404, detail=result.get("error", "document not found"))

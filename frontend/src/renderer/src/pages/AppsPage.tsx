@@ -1,5 +1,4 @@
 import {
-  AppstoreOutlined,
   DeleteOutlined,
   PlayCircleOutlined,
   ScanOutlined,
@@ -9,7 +8,7 @@ import {
 import { Button, Empty, message, notification, Space, Spin, Switch, Table, Typography } from 'antd'
 import type { TableColumnsType } from 'antd'
 import { useCallback, useEffect, useState } from 'react'
-import { api } from '@/services/api'
+import { api, BACKEND_URL } from '@/services/api'
 import { confirmOperation } from '@/services/confirm'
 import type { AppEntry } from '@/types'
 
@@ -19,11 +18,46 @@ function formatDateTime(ts: number): string {
   return new Date(ms).toLocaleString()
 }
 
+function AppIcon({ app, size = 20 }: { app: AppEntry; size?: number }): JSX.Element {
+  const [failed, setFailed] = useState(false)
+  if (failed) {
+    return (
+      <span
+        style={{
+          width: size,
+          height: size,
+          borderRadius: 4,
+          background: 'var(--paicc-panel, #f0f0f0)',
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          fontSize: Math.round(size * 0.6),
+          color: 'var(--paicc-text, #333)',
+          flexShrink: 0,
+        }}
+      >
+        {app.name.slice(0, 1)}
+      </span>
+    )
+  }
+  return (
+    <img
+      src={`${BACKEND_URL}/api/apps/icon/${app.id}`}
+      alt=""
+      width={size}
+      height={size}
+      style={{ width: size, height: size, borderRadius: 4, objectFit: 'contain', flexShrink: 0 }}
+      onError={() => setFailed(true)}
+    />
+  )
+}
+
 export default function AppsPage(): JSX.Element {
   const [apps, setApps] = useState<AppEntry[]>([])
   const [loading, setLoading] = useState<boolean>(false)
   const [scanning, setScanning] = useState<boolean>(false)
   const [favoritesOnly, setFavoritesOnly] = useState<boolean>(false)
+  const [recommended, setRecommended] = useState<AppEntry[]>([])
 
   const loadApps = useCallback(async (favOnly: boolean): Promise<void> => {
     setLoading(true)
@@ -39,9 +73,22 @@ export default function AppsPage(): JSX.Element {
     }
   }, [])
 
+  const loadRecommended = useCallback(async (): Promise<void> => {
+    try {
+      const { data } = await api.get<AppEntry[]>('/apps/recommend')
+      setRecommended(data)
+    } catch {
+      setRecommended([])
+    }
+  }, [])
+
   useEffect(() => {
     void loadApps(favoritesOnly)
   }, [favoritesOnly, loadApps])
+
+  useEffect(() => {
+    void loadRecommended()
+  }, [loadRecommended])
 
   const handleScan = async (): Promise<void> => {
     setScanning(true)
@@ -98,11 +145,7 @@ export default function AppsPage(): JSX.Element {
       key: 'name',
       render: (name: string, record: AppEntry) => (
         <Space>
-          {record.icon_path ? (
-            <img src={record.icon_path} alt="" style={{ width: 20, height: 20 }} />
-          ) : (
-            <AppstoreOutlined style={{ fontSize: 16 }} />
-          )}
+          <AppIcon key={record.id} app={record} size={20} />
           <Typography.Text strong>{name}</Typography.Text>
         </Space>
       ),
@@ -192,6 +235,43 @@ export default function AppsPage(): JSX.Element {
           </Button>
         </Space>
       </div>
+
+      {recommended.length > 0 && (
+        <div style={{ marginBottom: 16 }}>
+          <Typography.Title level={5} style={{ margin: '0 0 8px' }}>
+            推荐
+          </Typography.Title>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
+            {recommended.map((app) => (
+              <div
+                key={app.id}
+                onClick={() => void handleStart(app)}
+                title={`启动 ${app.name}`}
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  gap: 6,
+                  width: 96,
+                  padding: '10px 8px',
+                  border: '1px solid var(--paicc-border, #e5e5e5)',
+                  borderRadius: 8,
+                  cursor: 'pointer',
+                  background: 'var(--paicc-panel, #fff)',
+                }}
+              >
+                <AppIcon app={app} size={28} />
+                <Typography.Text
+                  ellipsis
+                  style={{ maxWidth: 84, fontSize: 12, textAlign: 'center' }}
+                >
+                  {app.name}
+                </Typography.Text>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {loading ? (
         <div style={{ textAlign: 'center', padding: 48 }}>

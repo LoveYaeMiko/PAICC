@@ -4,6 +4,7 @@ import {
   Empty,
   Input,
   List,
+  Progress,
   Select,
   Space,
   Spin,
@@ -13,9 +14,11 @@ import {
   notification,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '@/services/api'
-import type { DuplicateGroup, FileSearchResult, LargeFile } from '@/types'
+import { confirmOperation } from '@/services/confirm'
+import { useWsEvent } from '@/services/ws'
+import type { DuplicateGroup, FileSearchResult, FolderNode, LargeFile } from '@/types'
 
 interface ContentHit {
   path: string
@@ -48,6 +51,14 @@ const THRESHOLD_OPTIONS = [
   { value: 1024, label: '> 1 GB' },
 ]
 
+const TIME_OPTIONS = [
+  { value: '', label: '任意时间' },
+  { value: 'today', label: '今天' },
+  { value: 'week', label: '近一周' },
+  { value: 'month', label: '近一月' },
+  { value: 'year', label: '今年' },
+]
+
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return '0 B'
   const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
@@ -74,10 +85,64 @@ function errMsg(e: unknown): string {
   return err.response?.data?.detail ?? err.response?.data?.message ?? err.message ?? '未知错误'
 }
 
+function FolderTreeView(props: {
+  node: FolderNode
+  rootSize: number
+  depth?: number
+}): JSX.Element {
+  const { node, rootSize, depth = 0 } = props
+  const pct = rootSize > 0 ? (node.size / rootSize) * 100 : 0
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, paddingLeft: depth * 18 }}>
+        <span className="mono" style={{ minWidth: 200, flexShrink: 0, wordBreak: 'break-all' }}>
+          {node.name}
+        </span>
+        <div
+          style={{
+            flex: 1,
+            background: 'var(--paicc-border, rgba(0,0,0,0.12))',
+            height: 10,
+            borderRadius: 5,
+            overflow: 'hidden',
+          }}
+        >
+          <div
+            style={{
+              width: `${pct.toFixed(2)}%`,
+              height: '100%',
+              background: 'var(--paicc-accent)',
+              transition: 'width 0.2s ease',
+            }}
+          />
+        </div>
+        <span
+          style={{
+            minWidth: 90,
+            textAlign: 'right',
+            color: 'var(--paicc-muted)',
+            flexShrink: 0,
+          }}
+        >
+          {formatBytes(node.size)}
+        </span>
+      </div>
+      {node.children && node.children.length > 0 && (
+        <div>
+          {node.children.map((child) => (
+            <FolderTreeView key={child.path} node={child} rootSize={rootSize} depth={depth + 1} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function FilesPage(): JSX.Element {
   const [searchLoading, setSearchLoading] = useState(false)
   const [searchResults, setSearchResults] = useState<FileSearchResult[]>([])
   const [fileType, setFileType] = useState<string>('')
+  const [fileTime, setFileTime] = useState<string>('')
   const [sizeMin, setSizeMin] = useState<number>(0)
 
   const [contentLoading, setContentLoading] = useState(false)
@@ -95,8 +160,16 @@ export default function FilesPage(): JSX.Element {
   const [folderDir, setFolderDir] = useState('')
   const [folderLoading, setFolderLoading] = useState(false)
   const [folderSize, setFolderSize] = useState<number | null>(null)
+  const [folderTree, setFolderTree] = useState<FolderNode | null>(null)
+  const [folderTreeLoading, setFolderTreeLoading] = useState(false)
+
+  const [taskProgress, setTaskProgress] = useState<{ kind: 'large' | 'dup'; value: number } | null>(
+    null,
+  )
 
   const pollRef = useRef<number | null>(null)
+  const currentTaskRef = useRef<string | null>(null)
+  const currentKindRef = useRef<'large' | 'dup' | null>(null)
 
   useEffect(
     () => () => {
@@ -113,11 +186,15 @@ export default function FilesPage(): JSX.Element {
   }
 
   const pollTask = (
+    kind: 'large' | 'dup',
     taskId: string,
     onDone: (result: unknown) => void,
     onFail: (msg: string) => void,
   ): void => {
     if (pollRef.current !== null) window.clearInterval(pollRef.current)
+    currentTaskRef.current = taskId
+    currentKindRef.current = kind
+    setTaskProgress({ kind, value: 0 })
     pollRef.current = window.setInterval(async () => {
       try {
         const res = await api.get<unknown>(`/files/task/${taskId}`)
@@ -139,17 +216,34 @@ export default function FilesPage(): JSX.Element {
         const isFail = ['failed', 'error', 'cancelled'].includes(status)
         if (isDone) {
           stopPoll()
+          setTaskProgress({ kind, value: 1 })
           onDone(data.result ?? data.files ?? [])
         } else if (isFail) {
           stopPoll()
+          setTaskProgress(null)
           onFail(String(data.message ?? data.error ?? '任务失败'))
         }
       } catch (e) {
         stopPoll()
+        setTaskProgress(null)
         onFail(errMsg(e))
       }
     }, 1500)
   }
+
+  const onTaskProgress = useCallback((data: unknown) => {
+    const t = data as { id?: string; status?: string; progress?: number }
+    if (!t || typeof t.id !== 'string') return
+    if (currentTaskRef.current !== t.id) return
+    const kind = currentKindRef.current
+    if (!kind) return
+    const p = Number(t.progress)
+    if (Number.isFinite(p)) {
+      setTaskProgress({ kind, value: Math.min(1, Math.max(0, p)) })
+    }
+  }, [])
+
+  useWsEvent('task_progress', onTaskProgress)
 
   const handleFileSearch = async (q: string): Promise<void> => {
     if (!q.trim()) {
@@ -163,6 +257,7 @@ export default function FilesPage(): JSX.Element {
           query: q,
           ...(fileType ? { type: fileType } : {}),
           ...(sizeMin ? { size_min: sizeMin } : {}),
+          ...(fileTime ? { time: fileTime } : {}),
         },
       })
       const data = res.data as { ok?: boolean; results?: FileSearchResult[]; error?: string }
@@ -221,6 +316,7 @@ export default function FilesPage(): JSX.Element {
       const taskId = data.task_id ?? data.id
       if (!taskId) throw new Error('后端未返回任务 ID')
       pollTask(
+        'large',
         taskId,
         (result) => {
           const list = (Array.isArray(result) ? result : []) as LargeFile[]
@@ -252,6 +348,7 @@ export default function FilesPage(): JSX.Element {
       const taskId = data.task_id ?? data.id
       if (!taskId) throw new Error('后端未返回任务 ID')
       pollTask(
+        'dup',
         taskId,
         (result) => {
           setDupGroups((Array.isArray(result) ? result : []) as DuplicateGroup[])
@@ -286,6 +383,49 @@ export default function FilesPage(): JSX.Element {
       notification.error({ message: '计算文件夹大小失败', description: errMsg(e) })
     } finally {
       setFolderLoading(false)
+    }
+  }
+
+  const computeFolderTree = async (): Promise<void> => {
+    if (!folderDir.trim()) {
+      notification.warning({ message: '请输入文件夹路径' })
+      return
+    }
+    setFolderTreeLoading(true)
+    setFolderTree(null)
+    try {
+      const res = await api.get<unknown>('/files/folder-tree', {
+        params: { path: folderDir.trim(), depth: 3 },
+      })
+      setFolderTree(res.data as FolderNode)
+    } catch (e) {
+      notification.error({ message: '生成目录树失败', description: errMsg(e) })
+    } finally {
+      setFolderTreeLoading(false)
+    }
+  }
+
+  const deleteDuplicateGroup = async (group: DuplicateGroup): Promise<void> => {
+    const confirmationId = await confirmOperation('delete_duplicates', '删除重复文件', {
+      hash: group.hash,
+      count: group.count,
+      keep: group.files[0] ?? '',
+    })
+    if (!confirmationId) return
+    try {
+      const res = await api.post<unknown>('/files/delete-duplicates', {
+        hash: group.hash,
+        keep_index: 0,
+        confirmation_id: confirmationId,
+      })
+      const data = res.data as { deleted?: number; kept?: string }
+      notification.success({
+        message: '重复文件已删除',
+        description: `已删除 ${data.deleted ?? group.count - 1} 个重复文件，保留 ${data.kept ?? group.files[0] ?? ''}`,
+      })
+      setDupGroups((prev) => prev.filter((g) => g.hash !== group.hash))
+    } catch (e) {
+      notification.error({ message: '删除重复文件失败', description: errMsg(e) })
     }
   }
 
@@ -381,6 +521,16 @@ export default function FilesPage(): JSX.Element {
       width: 110,
       sorter: (a, b) => a.count - b.count,
     },
+    {
+      title: '操作',
+      key: 'action',
+      width: 120,
+      render: (_: unknown, record: DuplicateGroup) => (
+        <Button size="small" danger onClick={() => void deleteDuplicateGroup(record)}>
+          删除重复
+        </Button>
+      ),
+    },
   ]
 
   const items = [
@@ -408,6 +558,12 @@ export default function FilesPage(): JSX.Element {
               onChange={(v: number) => setSizeMin(v)}
               options={SIZE_OPTIONS}
               style={{ width: 150 }}
+            />
+            <Select
+              value={fileTime}
+              onChange={(v: string) => setFileTime(v)}
+              options={TIME_OPTIONS}
+              style={{ width: 130 }}
             />
           </Space>
           <Table
@@ -490,6 +646,9 @@ export default function FilesPage(): JSX.Element {
               开始扫描
             </Button>
           </Space>
+          {taskProgress !== null && taskProgress.kind === 'large' && (
+            <Progress percent={Math.round(taskProgress.value * 100)} size="small" status="active" />
+          )}
           <Table
             rowKey="path"
             columns={largeFileColumns}
@@ -520,6 +679,9 @@ export default function FilesPage(): JSX.Element {
               查找重复文件
             </Button>
           </Space>
+          {taskProgress !== null && taskProgress.kind === 'dup' && (
+            <Progress percent={Math.round(taskProgress.value * 100)} size="small" status="active" />
+          )}
           <Table
             rowKey="hash"
             columns={dupColumns}
@@ -563,6 +725,9 @@ export default function FilesPage(): JSX.Element {
             <Button type="primary" loading={folderLoading} onClick={() => void computeFolderSize()}>
               计算大小
             </Button>
+            <Button loading={folderTreeLoading} onClick={() => void computeFolderTree()}>
+              生成目录树
+            </Button>
           </Space>
           {folderSize !== null && (
             <Card size="small" style={{ maxWidth: 360 }}>
@@ -571,6 +736,20 @@ export default function FilesPage(): JSX.Element {
                 value={formatBytes(folderSize)}
                 valueStyle={{ color: 'var(--paicc-accent)' }}
               />
+            </Card>
+          )}
+          {folderTree !== null && (
+            <Card
+              size="small"
+              title={
+                <span className="mono" style={{ fontSize: 13 }}>
+                  {folderTree.path}
+                </span>
+              }
+            >
+              <div style={{ maxHeight: 480, overflow: 'auto' }}>
+                <FolderTreeView node={folderTree} rootSize={folderTree.size} />
+              </div>
             </Card>
           )}
         </Space>

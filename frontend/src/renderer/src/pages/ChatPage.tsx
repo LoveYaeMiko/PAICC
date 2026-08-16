@@ -1,6 +1,7 @@
 import { ClearOutlined, SendOutlined } from '@ant-design/icons'
 import { Button, Empty, Input, Space, Spin, Tag } from 'antd'
 import { useEffect, useRef, useState } from 'react'
+import { useLocation } from 'react-router-dom'
 import { useChatStore } from '@/store/useChatStore'
 import type { ChatMessage } from '@/types'
 
@@ -9,11 +10,20 @@ const { TextArea } = Input
 export default function ChatPage(): JSX.Element {
   const { messages, sending, send, clear } = useChatStore()
   const [text, setText] = useState('')
+  const location = useLocation()
   const bottomRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
+
+  // Seed the input from navigation state (e.g. "让 AI 分析" red-line shortcut).
+  useEffect(() => {
+    const prefill = (location.state as { prefill?: string } | null)?.prefill
+    if (typeof prefill === 'string' && prefill.trim()) {
+      setText(prefill)
+    }
+  }, [location.state])
 
   const handleSend = async (): Promise<void> => {
     const value = text.trim()

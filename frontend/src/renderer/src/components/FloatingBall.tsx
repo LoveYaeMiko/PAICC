@@ -11,8 +11,27 @@ import {
   SettingOutlined,
 } from '@ant-design/icons'
 import { useEffect, useRef, useState } from 'react'
-import { api } from '@/services/api'
+import { api, BACKEND_URL } from '@/services/api'
 import type { AppEntry } from '@/types'
+
+function AppIcon({ app, size }: { app: AppEntry; size: number }): JSX.Element {
+  const [failed, setFailed] = useState(false)
+  if (failed) {
+    return (
+      <span style={{ fontSize: 12, color: 'var(--paicc-text)' }}>{app.name.slice(0, 1)}</span>
+    )
+  }
+  return (
+    <img
+      src={`${BACKEND_URL}/api/apps/icon/${app.id}`}
+      alt=""
+      width={size}
+      height={size}
+      style={{ width: size, height: size, borderRadius: 4, objectFit: 'contain' }}
+      onError={() => setFailed(true)}
+    />
+  )
+}
 
 const BALL_SIZE = 64
 const CENTER_X = 170
@@ -130,7 +149,7 @@ export default function FloatingBall(): JSX.Element {
                 style={{ left, top, width: 32, height: 32, fontSize: 12 }}
                 onClick={() => launch(app.id)}
               >
-                {app.name.slice(0, 1)}
+                <AppIcon app={app} size={22} />
               </div>
             )
           })}

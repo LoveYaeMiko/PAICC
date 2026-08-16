@@ -7,12 +7,15 @@ the child process never blocks on a full pipe.
 """
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +33,30 @@ available: bool = bool(shutil.which("claude"))
 running: bool = False
 
 
+# --------------------------------------------------------------------------- #
+# File-change watcher (polling snapshot, no third-party dependencies)
+# --------------------------------------------------------------------------- #
+#: Directory names skipped while walking the watched tree.
+_FILE_IGNORE_DIRS = {
+    ".git", ".svn", ".hg", ".claude", ".idea", ".vscode", ".pytest_cache",
+    ".venv", "venv", "env", "node_modules", "__pycache__", "build", "dist",
+    "logs",
+}
+#: Files larger than this (bytes) are not snapshotted into memory for diffs.
+_MAX_SNAPSHOT_BYTES = 512 * 1024
+#: Maximum number of diff lines emitted in a single ``file_changed`` event.
+_MAX_DIFF_LINES = 800
+#: Polling interval (seconds) between directory scans.
+_WATCH_INTERVAL = 2.0
+
+#: Watcher state — owned exclusively by the single polling thread.
+_watch_started = False
+_watch_dir: str | None = None
+_watch_snapshot: dict[str, tuple[int, int]] = {}
+_watch_content: dict[str, list[str]] = {}
+_git_top_cache: dict[str, str | None] = {}
+
+
 def _resolve_claude() -> str | None:
     """Resolve the ``claude`` CLI path from config, falling back to PATH lookup."""
     configured = str(settings.get("claude_path", "") or "").strip()
@@ -38,12 +65,79 @@ def _resolve_claude() -> str | None:
     return shutil.which("claude")
 
 
+def _build_context() -> str:
+    """Build a short single-line system-state summary to inject into the session.
+
+    Lazily imports ``system_monitor`` / ``quant_manager`` and tolerates any failure
+    so context injection can never block or break session startup. The result is
+    deliberately one line: a multi-line argument is truncated by ``cmd /c`` on
+    Windows when the CLI is launched through its ``claude.cmd`` shim.
+    """
+    parts = ["[PAICC system context]"]
+    try:
+        from app.services import system_monitor
+
+        stats = system_monitor.get_system_stats()
+        cpu = stats.get("cpu_percent")
+        mem = (stats.get("memory") or {}).get("percent")
+        if cpu is not None and mem is not None:
+            parts.append(f"CPU {cpu}%, memory {mem}%")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("system stats unavailable for context: %s", exc)
+
+    try:
+        from app.services import quant_manager
+
+        status = quant_manager.get_status()
+        overall = str(status.get("overall") or "unknown")
+        red_lines = status.get("red_lines") or []
+        # Use the ASCII ``name`` (not the localised ``label``) so the injected
+        # context stays locale-independent and safe to pass through ``cmd /c``.
+        summary = "; ".join(
+            f"{rl.get('name') or rl.get('label')}={rl.get('level')}"
+            for rl in red_lines
+        )
+        parts.append(f"quant red lines[{overall}]: {summary or 'none'}")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("quant status unavailable for context: %s", exc)
+
+    parts.append(f"cwd={_cwd()}")
+    context = " ; ".join(parts)
+    return context.replace("\r", " ").replace("\n", " ")
+
+
+def _cmd_escape_arg(value: str) -> str:
+    """Escape one argument so ``cmd /c`` re-parses it literally.
+
+    ``cmd.exe`` re-parses the joined command line, so an argument containing spaces
+    or metacharacters must be wrapped in double quotes, ``%`` must be doubled to
+    suppress environment-variable expansion, and embedded double quotes are doubled
+    (``""``) so they survive as literal quotes for the child shell.
+    """
+    value = str(value).replace("%", "%%").replace('"', '""')
+    if not value:
+        return '""'
+    if re.search(r'[\s&|<>^()"]', value):
+        return f'"{value}"'
+    return value
+
+
 def _claude_command() -> list[str]:
-    """Build the spawn argv, routing ``.cmd``/``.bat`` through ``cmd /c`` on Windows."""
+    """Build the spawn argv, routing ``.cmd``/``.bat`` through ``cmd /c`` on Windows.
+
+    The ``--append-system-prompt`` flag (verified against the installed CLI) injects
+    a one-line system-state summary as extra context for the session. When routing
+    through ``cmd``, each argument is escaped and the command is passed as a single
+    string so ``cmd`` re-parses it correctly (avoids metacharacter injection and
+    broken multi-word flags).
+    """
     path = _resolve_claude() or "claude"
     args = [path, "--output-format", "stream-json"]
+    context = _build_context()
+    if context:
+        args += ["--append-system-prompt", context]
     if os.name == "nt" and path.lower().endswith((".cmd", ".bat")):
-        return ["cmd", "/c", *args]
+        return ["cmd", "/c", " ".join(_cmd_escape_arg(a) for a in args)]
     return args
 
 
@@ -128,6 +222,197 @@ def _stderr_reader(p: subprocess.Popen[str]) -> None:
         pass
 
 
+# --------------------------------------------------------------------------- #
+# File-change watcher implementation
+# --------------------------------------------------------------------------- #
+def _read_text_lines(path: str) -> list[str] | None:
+    """Read a file as text lines for diffing, or ``None`` if too large/unreadable."""
+    try:
+        if os.path.getsize(path) > _MAX_SNAPSHOT_BYTES:
+            return None
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read().splitlines(keepends=True)
+    except OSError:
+        return None
+
+
+def _git_top_level(root: str) -> str | None:
+    """Return the git work-tree top containing ``root`` (cached), else ``None``."""
+    key = os.path.normcase(os.path.abspath(root))
+    if key in _git_top_cache:
+        return _git_top_cache[key]
+    top: str | None = None
+    try:
+        proc = subprocess.run(
+            ["git", "-C", root, "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if proc.returncode == 0:
+            candidate = proc.stdout.strip()
+            if candidate:
+                top = candidate
+    except (OSError, subprocess.TimeoutExpired):
+        top = None
+    _git_top_cache[key] = top
+    return top
+
+
+def _truncate_diff(text: str) -> str:
+    """Cap a diff to ``_MAX_DIFF_LINES`` lines to keep events bounded."""
+    lines = text.splitlines()
+    if len(lines) > _MAX_DIFF_LINES:
+        head = "\n".join(lines[:_MAX_DIFF_LINES])
+        return f"{head}\n... ({len(lines) - _MAX_DIFF_LINES} more diff lines)"
+    return text
+
+
+def _added_file_diff(rel: str, full: str) -> str:
+    """Render a new file as a whole-file addition (``+``-prefixed lines)."""
+    lines = _read_text_lines(full)
+    if lines is None:
+        return f"new file: {rel}\n(binary or too large to display)"
+    truncated = len(lines) > _MAX_DIFF_LINES
+    shown = lines[:_MAX_DIFF_LINES] if truncated else lines
+    body = "".join(f"+{ln}" for ln in shown)
+    if body and not body.endswith("\n"):
+        body += "\n"
+    note = f"... ({len(lines) - _MAX_DIFF_LINES} more lines)" if truncated else ""
+    return f"new file: {rel}\n{body}{note}"
+
+
+def _git_diff(top: str, rel: str, full: str, kind: str) -> str | None:
+    """Compute a diff via git; new files are rendered as whole-file additions."""
+    if kind == "added":
+        return _added_file_diff(rel, full)
+    rel_top = os.path.relpath(full, top).replace(os.sep, "/")
+    try:
+        proc = subprocess.run(
+            ["git", "-C", top, "diff", "--", rel_top],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    out = proc.stdout
+    if not out.strip():
+        return None
+    return _truncate_diff(out)
+
+
+def _fallback_diff(root: str, rel: str, kind: str) -> str | None:
+    """Diff against the cached in-memory snapshot (difflib) when git is absent."""
+    full = os.path.join(root, rel)
+    if kind == "added":
+        return _added_file_diff(rel, full)
+    new_lines = _read_text_lines(full)
+    old_lines = _watch_content.get(rel)
+    _watch_content[rel] = new_lines if new_lines is not None else []
+    if new_lines is None:
+        return f"modified: {rel}\n(binary or too large to diff)"
+    if old_lines is None:
+        return _added_file_diff(rel, full)
+    text = "".join(
+        difflib.unified_diff(
+            old_lines, new_lines, fromfile=f"a/{rel}", tofile=f"b/{rel}"
+        )
+    )
+    return _truncate_diff(text)
+
+
+def _emit_file_change(root: str, rel: str, kind: str) -> None:
+    """Publish a ``claude_event`` of type ``file_changed`` for one path."""
+    full = os.path.join(root, rel)
+    if kind == "deleted":
+        diff = f"deleted: {rel}"
+        _watch_content.pop(rel, None)
+    elif _git_top_level(root) is not None:
+        diff = _git_diff(_git_top_level(root), rel, full, kind)
+    else:
+        diff = _fallback_diff(root, rel, kind)
+    if not diff or not diff.strip():
+        return
+    publish(
+        "claude_event",
+        {"type": "file_changed", "file": rel, "diff": diff, "timestamp": time.time()},
+    )
+
+
+def _build_snapshot(root: str) -> dict[str, tuple[int, int]]:
+    """Walk the tree once and return ``{relpath: (mtime_ns, size)}``."""
+    snapshot: dict[str, tuple[int, int]] = {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [
+            d
+            for d in dirnames
+            if d not in _FILE_IGNORE_DIRS and not d.startswith(".")
+        ]
+        for fn in filenames:
+            full = os.path.join(dirpath, fn)
+            try:
+                st = os.stat(full)
+            except OSError:
+                continue
+            snapshot[os.path.relpath(full, root)] = (st.st_mtime_ns, st.st_size)
+    return snapshot
+
+
+def _file_watch_loop() -> None:
+    """Poll the working directory and publish ``file_changed`` events on changes."""
+    global _watch_dir, _watch_snapshot, _watch_content
+    while True:
+        try:
+            root = _cwd()
+            if root and Path(root).is_dir():
+                if root != _watch_dir:
+                    _watch_dir = root
+                    _watch_snapshot = {}
+                    _watch_content = {}
+                    first = True
+                else:
+                    first = not _watch_snapshot
+
+                current = _build_snapshot(root)
+
+                # Seed the in-memory content snapshot once so the difflib fallback
+                # (no-git case) has a baseline to diff against.
+                if first and _git_top_level(root) is None:
+                    for rel in current:
+                        lines = _read_text_lines(os.path.join(root, rel))
+                        _watch_content[rel] = lines if lines is not None else []
+
+                for rel, stat in current.items():
+                    prev = _watch_snapshot.get(rel)
+                    if prev is None:
+                        if not first:
+                            _emit_file_change(root, rel, "added")
+                    elif prev != stat:
+                        _emit_file_change(root, rel, "modified")
+
+                for rel in list(_watch_snapshot.keys()):
+                    if rel not in current:
+                        _emit_file_change(root, rel, "deleted")
+
+                _watch_snapshot = current
+        except Exception:  # noqa: BLE001
+            logger.exception("claude file watcher tick failed")
+        time.sleep(_WATCH_INTERVAL)
+
+
+def _start_file_watcher() -> None:
+    """Start the polling watcher thread (idempotent)."""
+    global _watch_started
+    if _watch_started:
+        return
+    _watch_started = True
+    threading.Thread(target=_file_watch_loop, daemon=True, name="claude-file-watch").start()
+    logger.info("claude file watcher started on %s", _cwd())
+
+
 def start() -> None:
     """Idempotent boot hook — only records CLI availability, never auto-starts a session."""
     global _started, available
@@ -135,6 +420,7 @@ def start() -> None:
         return
     available = _resolve_claude() is not None
     _started = True
+    _start_file_watcher()
 
 
 def start_session() -> dict[str, Any]:

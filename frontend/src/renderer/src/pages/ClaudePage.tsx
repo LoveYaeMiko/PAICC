@@ -3,11 +3,18 @@ import { Badge, Button, Input, Space, Spin, notification } from 'antd'
 import { useCallback, useEffect, useState } from 'react'
 import ClaudeTerminal from '@/components/ClaudeTerminal'
 import { api } from '@/services/api'
+import { useWsEvent } from '@/services/ws'
 
 interface ClaudeStatus {
   available: boolean
   running: boolean
   [key: string]: unknown
+}
+
+interface FileChange {
+  file: string
+  diff: string
+  timestamp: number
 }
 
 export default function ClaudePage(): JSX.Element {
@@ -17,6 +24,8 @@ export default function ClaudePage(): JSX.Element {
   const [sending, setSending] = useState(false)
   const [starting, setStarting] = useState(false)
   const [stopping, setStopping] = useState(false)
+  const [fileChanges, setFileChanges] = useState<FileChange[]>([])
+  const [changesOpen, setChangesOpen] = useState(false)
 
   const loadStatus = useCallback(async (): Promise<void> => {
     try {
@@ -32,6 +41,18 @@ export default function ClaudePage(): JSX.Element {
   useEffect(() => {
     loadStatus()
   }, [loadStatus])
+
+  const onFileEvent = useCallback((raw: unknown): void => {
+    const data = (raw ?? {}) as { type?: string; file?: unknown; diff?: unknown; timestamp?: unknown }
+    if (data.type !== 'file_changed') return
+    const file = typeof data.file === 'string' ? data.file : ''
+    const diff = typeof data.diff === 'string' ? data.diff : ''
+    if (!file && !diff) return
+    const timestamp = typeof data.timestamp === 'number' ? data.timestamp : Date.now()
+    setFileChanges((prev) => [{ file, diff, timestamp }, ...prev].slice(0, 50))
+  }, [])
+
+  useWsEvent('claude_event', onFileEvent)
 
   const handleStart = async (): Promise<void> => {
     setStarting(true)
@@ -129,6 +150,88 @@ export default function ClaudePage(): JSX.Element {
       </div>
 
       <ClaudeTerminal />
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div
+          onClick={() => setChangesOpen((open) => !open)}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            cursor: 'pointer',
+            padding: '10px 12px',
+            background: '#171a21',
+            border: '1px solid #262b36',
+            borderRadius: 8,
+            userSelect: 'none',
+          }}
+        >
+          <span style={{ color: '#e6e9ef' }}>{changesOpen ? '▾' : '▸'} 文件变更</span>
+          <span
+            style={{
+              color: '#57c7ff',
+              fontSize: 12,
+              padding: '0 8px',
+              borderRadius: 10,
+              background: 'rgba(87, 199, 255, 0.12)',
+            }}
+          >
+            {fileChanges.length}
+          </span>
+        </div>
+        {changesOpen && (
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 8,
+              maxHeight: 420,
+              overflowY: 'auto',
+            }}
+          >
+            {fileChanges.length === 0 ? (
+              <div style={{ color: '#8a93a6', padding: '4px 0' }}>暂无文件变更</div>
+            ) : (
+              fileChanges.map((fc, i) => (
+                <div
+                  key={`${fc.timestamp}-${i}`}
+                  style={{
+                    border: '1px solid #262b36',
+                    borderRadius: 6,
+                    background: '#0f1115',
+                    padding: 8,
+                  }}
+                >
+                  <div
+                    style={{
+                      color: '#57c7ff',
+                      fontFamily: "'Cascadia Code', Consolas, monospace",
+                      fontSize: 12,
+                      marginBottom: 4,
+                      wordBreak: 'break-all',
+                    }}
+                  >
+                    {fc.file}
+                  </div>
+                  <pre
+                    style={{
+                      margin: 0,
+                      fontFamily: "'Cascadia Code', 'Fira Code', Consolas, 'Courier New', monospace",
+                      fontSize: 12,
+                      lineHeight: 1.5,
+                      whiteSpace: 'pre-wrap',
+                      wordBreak: 'break-all',
+                      color: '#e6e9ef',
+                    }}
+                  >
+                    {fc.diff}
+                  </pre>
+                </div>
+              ))
+            )}
+          </div>
+        )}
+      </div>
 
       <div style={{ display: 'flex', gap: 8 }}>
         <Input

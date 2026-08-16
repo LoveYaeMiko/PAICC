@@ -8,6 +8,7 @@ items safely.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import shutil
 import tempfile
@@ -15,7 +16,13 @@ from typing import Any, Iterator
 
 from app.services import task_manager
 
+logger = logging.getLogger(__name__)
+
 _HASH_READ_BYTES = 1024 * 1024  # hash the first 1 MB (plus size) for duplicate grouping
+
+#: Most recent duplicate groups by hash (populated by :func:`find_duplicates`), so
+#: :func:`delete_duplicates` can resolve a hash back to its file list without rescanning.
+_DUPLICATE_INDEX: dict[str, list[str]] = {}
 
 
 def _iter_files(directory: str) -> Iterator[str]:
@@ -83,6 +90,7 @@ def find_duplicates(directory: str, min_size_mb: float = 1, limit: int = 500) ->
             candidates.extend((fp, size) for fp in files)
 
     if not candidates:
+        _DUPLICATE_INDEX.clear()
         task_manager.update_task(progress=1.0, result=[])
         return []
 
@@ -108,8 +116,40 @@ def find_duplicates(directory: str, min_size_mb: float = 1, limit: int = 500) ->
             )
     results.sort(key=lambda g: g["size"] * (g["count"] - 1), reverse=True)
     results = results[:limit]
+    _DUPLICATE_INDEX.clear()
+    for group in results:
+        _DUPLICATE_INDEX[group["hash"]] = list(group["files"])
     task_manager.update_task(progress=1.0, result=results)
     return results
+
+
+def delete_duplicates(hash: str, keep_index: int = 0) -> dict[str, Any]:
+    """Delete every file in a duplicate group except the kept one.
+
+    The group is resolved from the last :func:`find_duplicates` run via
+    :data:`_DUPLICATE_INDEX`. Each removal is attempted with ``os.unlink`` and logged;
+    individual failures are collected in ``errors`` without aborting the rest.
+    """
+    files = list(_DUPLICATE_INDEX.get(hash, []))
+    if not files:
+        return {"ok": False, "deleted": 0, "kept": None, "errors": [{"error": "unknown duplicate group"}]}
+
+    keep_index = max(0, min(int(keep_index), len(files) - 1))
+    kept = files[keep_index]
+    deleted = 0
+    errors: list[dict[str, Any]] = []
+    for i, fp in enumerate(files):
+        if i == keep_index:
+            continue
+        try:
+            os.unlink(fp)
+            deleted += 1
+            logger.info("deleted duplicate file: %s", fp)
+        except OSError as exc:
+            logger.warning("failed to delete duplicate %s: %s", fp, exc)
+            errors.append({"path": fp, "error": str(exc)})
+    _DUPLICATE_INDEX.pop(hash, None)
+    return {"ok": True, "deleted": deleted, "kept": kept, "errors": errors}
 
 
 def _partial_hash(path: str, size: int) -> str:
@@ -213,3 +253,62 @@ def folder_size(directory: str) -> int:
     except OSError:
         pass
     return total
+
+
+def folder_tree(path: str, max_depth: int = 3) -> dict[str, Any]:
+    """Return a nested folder-size tree ``{name, path, size, children:[...]}``.
+
+    Walks via ``os.scandir``, skipping symlink loops and tolerating permission errors.
+    ``size`` is always the full recursive size of a node; ``children`` are only populated
+    down to ``max_depth`` so the response stays bounded for huge trees.
+    """
+    max_depth = max(0, int(max_depth))
+
+    def _dir_size(directory: str) -> int:
+        total = 0
+        try:
+            for entry in os.scandir(directory):
+                try:
+                    if entry.is_symlink():
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        total += _dir_size(entry.path)
+                    elif entry.is_file(follow_symlinks=False):
+                        total += entry.stat(follow_symlinks=False).st_size
+                except OSError:
+                    continue
+        except OSError:
+            pass
+        return total
+
+    def _build(directory: str, depth: int) -> dict[str, Any]:
+        name = os.path.basename(directory.rstrip("\\/")) or directory
+        node: dict[str, Any] = {"name": name, "path": directory, "size": 0, "children": []}
+        try:
+            entries = list(os.scandir(directory))
+        except OSError:
+            return node
+
+        size = 0
+        children: list[dict[str, Any]] = []
+        for entry in entries:
+            try:
+                if entry.is_symlink():
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    if depth < max_depth:
+                        child = _build(entry.path, depth + 1)
+                        children.append(child)
+                        size += child["size"]
+                    else:
+                        size += _dir_size(entry.path)
+                elif entry.is_file(follow_symlinks=False):
+                    size += entry.stat(follow_symlinks=False).st_size
+            except OSError:
+                continue
+        children.sort(key=lambda c: c["size"], reverse=True)
+        node["size"] = size
+        node["children"] = children
+        return node
+
+    return _build(path, 0)

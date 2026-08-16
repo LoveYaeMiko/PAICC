@@ -9,7 +9,7 @@ import {
   PieChartOutlined,
   SettingOutlined,
 } from '@ant-design/icons'
-import { Badge, Layout, Menu, Tag, notification } from 'antd'
+import { Badge, Button, Layout, Menu, Tag, notification } from 'antd'
 import { useEffect, useMemo } from 'react'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { api } from '@/services/api'
@@ -63,9 +63,23 @@ export default function MainLayout(): JSX.Element {
   }, [navigate])
 
   // Proactive notifications from the backend (red lines, low disk, high temp…).
+  const openAIAnalysis = (d: { title?: string; message?: string; names?: string[] }): void => {
+    const names = Array.isArray(d.names) && d.names.length > 0 ? d.names : []
+    const label = names.length > 0 ? names.join('、') : (d.title ?? '量化红线')
+    navigate('/chat', { state: { prefill: `红线 ${label} 触发，帮我分析并给出处理建议` } })
+  }
+
   useWsEvent('red_line_alert', (data) => {
-    const d = data as { title?: string; message?: string }
-    api2.warning({ message: d.title ?? '量化红线触发', description: d.message ?? '' })
+    const d = data as { title?: string; message?: string; names?: string[] }
+    api2.warning({
+      message: d.title ?? '量化红线触发',
+      description: d.message ?? '',
+      btn: (
+        <Button size="small" type="primary" onClick={() => openAIAnalysis(d)}>
+          让 AI 分析
+        </Button>
+      ),
+    })
   })
   useWsEvent('system_alert', (data) => {
     const d = data as { title?: string; message?: string }

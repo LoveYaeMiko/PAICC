@@ -57,6 +57,25 @@ def list_documents() -> dict[str, Any]:
 
 
 @tool(
+    name="save_to_knowledge_base",
+    description="Save a titled piece of text (e.g. a report, note, or summary) into "
+    "the knowledge base as a searchable document.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "title": {"type": "string", "description": "Document title"},
+            "text": {"type": "string", "description": "Text content to save"},
+        },
+        "required": ["title", "text"],
+    },
+    category="research",
+)
+def save_to_knowledge_base(title: str, text: str) -> dict[str, Any]:
+    """Save a titled document into the knowledge base."""
+    return knowledge_base.ingest_text(title, text)
+
+
+@tool(
     name="generate_research_report",
     description="Generate a structured Markdown research report on a topic using the "
     "local knowledge base and, when needed, web search.",

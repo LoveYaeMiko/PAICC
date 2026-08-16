@@ -9,6 +9,8 @@ export interface PaiccBridge {
   showMain: () => void
   openExternal: (url: string) => void
   openRoute: (route: string) => void
+  getAutoLaunch: () => Promise<boolean>
+  setAutoLaunch: (v: boolean) => Promise<boolean>
   onNavigate: (cb: (route: string) => void) => void
   onBackendStatus: (cb: (status: { ready: boolean; url: string }) => void) => void
   onToggleInput: (cb: () => void) => void

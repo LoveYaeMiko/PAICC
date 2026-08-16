@@ -252,6 +252,11 @@ function registerIpc(): void {
     mainWindow?.show()
     if (typeof route === 'string') mainWindow?.webContents.send('paicc:navigate', route)
   })
+  ipcMain.handle('paicc:get-auto-launch', () => app.getLoginItemSettings().openAtLogin)
+  ipcMain.handle('paicc:set-auto-launch', (_e, openAtLogin: boolean) => {
+    app.setLoginItemSettings({ openAtLogin: Boolean(openAtLogin) })
+    return app.getLoginItemSettings().openAtLogin
+  })
 }
 
 // ---------------------------------------------------------------------------

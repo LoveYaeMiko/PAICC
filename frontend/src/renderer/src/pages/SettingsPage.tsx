@@ -1,4 +1,4 @@
-import { Button, Form, Input, Select, Space, Spin, Table, Tag, notification } from 'antd'
+import { Button, Form, Input, Select, Space, Spin, Switch, Table, Tag, notification } from 'antd'
 import type { TableColumnsType } from 'antd'
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
@@ -56,6 +56,8 @@ export default function SettingsPage(): JSX.Element {
   const [form] = Form.useForm()
   const [logs, setLogs] = useState<OperationLog[]>([])
   const [logsLoading, setLogsLoading] = useState(false)
+  const [autoLaunch, setAutoLaunch] = useState(false)
+  const [autoLaunchLoading, setAutoLaunchLoading] = useState(true)
 
   useEffect(() => {
     void load()
@@ -66,6 +68,25 @@ export default function SettingsPage(): JSX.Element {
       .catch(() => notification.error({ message: '操作日志加载失败' }))
       .finally(() => setLogsLoading(false))
   }, [load])
+
+  useEffect(() => {
+    window.paicc
+      ?.getAutoLaunch()
+      .then((v) => setAutoLaunch(Boolean(v)))
+      .catch(() => {})
+      .finally(() => setAutoLaunchLoading(false))
+  }, [])
+
+  const handleAutoLaunchChange = async (checked: boolean): Promise<void> => {
+    setAutoLaunch(checked)
+    try {
+      await window.paicc?.setAutoLaunch(checked)
+      notification.success({ message: checked ? '已开启开机自启' : '已关闭开机自启' })
+    } catch (err) {
+      setAutoLaunch(!checked)
+      notification.error({ message: '开机自启设置失败', description: String(err) })
+    }
+  }
 
   useEffect(() => {
     if (Object.keys(settings).length > 0) {
@@ -115,6 +136,29 @@ export default function SettingsPage(): JSX.Element {
     <div>
       <Spin spinning={loading}>
         <Form form={form} layout="vertical">
+          <SectionTitle>系统</SectionTitle>
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              padding: '12px 16px',
+              border: '1px solid #262b36',
+              borderRadius: 8,
+              marginBottom: 12,
+            }}
+          >
+            <div>
+              <div style={{ color: '#e6e9ef' }}>开机自启</div>
+              <div style={{ color: '#8b93a1', fontSize: 12 }}>系统启动时自动运行 PAICC</div>
+            </div>
+            <Switch
+              checked={autoLaunch}
+              loading={autoLaunchLoading}
+              onChange={handleAutoLaunchChange}
+            />
+          </div>
+
           <SectionTitle>LLM</SectionTitle>
           <FieldGrid>
             <Form.Item name="llm_provider" label="Provider">

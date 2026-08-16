@@ -9,6 +9,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 
 from app import db
+from app.deps import require_confirmation
 from app.services import everything, file_ops, task_manager, windows_search
 
 router = APIRouter(prefix="/files", tags=["files"])
@@ -21,8 +22,11 @@ def search(
     size_min: int | None = None,
     size_max: int | None = None,
     limit: int = 50,
+    time: str | None = None,
 ) -> dict[str, Any]:
-    return everything.search(query, type=type, size_min=size_min, size_max=size_max, limit=limit)
+    return everything.search(
+        query, type=type, size_min=size_min, size_max=size_max, limit=limit, time=time
+    )
 
 
 @router.get("/content-search")
@@ -63,6 +67,25 @@ def folder_size(directory: str) -> dict[str, Any]:
     if not directory or not os.path.isdir(directory):
         raise HTTPException(status_code=400, detail="Invalid directory")
     return {"directory": directory, "size": file_ops.folder_size(directory)}
+
+
+@router.get("/folder-tree")
+def folder_tree(path: str, depth: int = 3) -> dict[str, Any]:
+    if not path or not os.path.isdir(path):
+        raise HTTPException(status_code=400, detail="Invalid directory")
+    return file_ops.folder_tree(path, max_depth=depth)
+
+
+@router.post("/delete-duplicates")
+def delete_duplicates(payload: dict[str, Any]) -> dict[str, Any]:
+    hash_ = payload.get("hash") or ""
+    keep_index = int(payload.get("keep_index", 0) or 0)
+    if not hash_:
+        raise HTTPException(status_code=400, detail="hash required")
+    require_confirmation(payload.get("confirmation_id"), action="delete_duplicates")
+    result = file_ops.delete_duplicates(hash_, keep_index=keep_index)
+    db.log_operation("delete_duplicates", {"hash": hash_, "keep_index": keep_index}, result)
+    return result
 
 
 @router.post("/open")
