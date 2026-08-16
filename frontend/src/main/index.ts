@@ -300,7 +300,6 @@ function registerIpc(): void {
 // Lifecycle
 // ---------------------------------------------------------------------------
 app.whenReady().then(() => {
-  app.setLoginItemSettings({ openAtLogin: process.env.PAICC_OPEN_AT_LOGIN === '1' })
   registerIpc()
   createMainWindow()
   createBallWindow()

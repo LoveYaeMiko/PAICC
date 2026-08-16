@@ -107,12 +107,8 @@ def init_db() -> None:
 
 
 def _seed_defaults() -> None:
-    from app.config import DEFAULTS, settings
+    from app.config import settings
 
-    existing = {r["key"] for r in query("SELECT key FROM settings")}
-    for key, value in DEFAULTS.items():
-        if key not in existing:
-            execute("INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (key, str(value)))
     # Seed the default quant project if it doesn't exist.
     if not query("SELECT id FROM quant_projects LIMIT 1"):
         root = settings.get_quant_root()
@@ -152,6 +148,10 @@ def set_setting(key: str, value: Any) -> None:
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         (key, str(value)),
     )
+
+
+def delete_setting(key: str) -> None:
+    execute("DELETE FROM settings WHERE key = ?", (key,))
 
 
 def log_operation(action: str, params: Any = None, result: Any = None, user: str = "local") -> int:

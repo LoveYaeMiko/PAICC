@@ -1,6 +1,7 @@
 """Settings, confirmations and operation-log endpoints."""
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -22,9 +23,25 @@ def get_settings() -> dict[str, Any]:
 def put_settings(payload: dict[str, Any]) -> dict[str, Any]:
     updated: dict[str, Any] = {}
     for key, value in payload.items():
-        if key in DEFAULTS:
+        if key not in DEFAULTS:
+            continue
+        val = str(value)
+        default_val = str(DEFAULTS[key])
+        env_val = os.environ.get(f"PAICC_{key.upper()}")
+        # Persist only a genuine override: something that differs from the empty
+        # value, the built-in default, and the environment. Otherwise drop any stale
+        # DB row so ``.env`` and the defaults remain the single source of truth
+        # (this also keeps secrets like the LLM API key out of the database).
+        is_fallback = (
+            val == ""
+            or val == default_val
+            or (env_val is not None and val == env_val)
+        )
+        if is_fallback:
+            settings.delete(key)
+        else:
             settings.set(key, value)
-            updated[key] = settings.get(key)
+        updated[key] = settings.get(key)
     return {"ok": True, "updated": updated}
 
 

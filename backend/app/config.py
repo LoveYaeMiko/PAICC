@@ -1,15 +1,14 @@
 """Runtime configuration.
 
 Resolution order (highest first):
-  1. SQLite ``settings`` table — an explicit user override (a value that is non-empty
-     *and* differs from the built-in default) wins. This is what makes Settings-UI
-     edits persist across restarts.
+  1. SQLite ``settings`` table — an explicit, non-empty user override. This is what
+     makes Settings-UI edits persist across restarts. Values equal to the built-in
+     default, or equal to an environment variable, are *not* stored here (so secrets
+     stay in ``backend/.env`` and a future ``.env`` edit keeps taking effect).
   2. Environment variables (``PAICC_<KEY_UPPER>``) — including values loaded from
-     ``backend/.env``. These act as the initial/fallback configuration (secrets such
-     as the LLM API key or SMTP password typically live here so they stay out of git).
-  3. SQLite ``settings`` table — any remaining value (e.g. the row seeded from the
-     built-in defaults at first boot).
-  4. Built-in defaults below.
+     ``backend/.env``. These act as the fallback configuration (secrets such as the
+     LLM API key or SMTP password live here so they stay out of git).
+  3. Built-in defaults below.
 
 The DB layer is imported lazily so this module never creates a circular import and
 the settings can be read before the database is initialised.
@@ -83,19 +82,16 @@ class Settings:
         except Exception:
             val = None
 
-        # A DB value only counts as an explicit user override when it is non-empty and
-        # differs from the built-in default. Rows seeded from the defaults at first boot
-        # must NOT shadow the .env configuration (e.g. the Everything CLI path or the
-        # LLM API key), so those fall through to the environment variable below.
-        if val is not None and str(val) != "" and str(val) != str(default_val):
+        # An explicit, non-empty override stored in the DB always wins. Non-overrides
+        # are never written to the DB (see ``put_settings``), so a non-empty value here
+        # is a genuine user edit, never a seeded default or an env value.
+        if val is not None and str(val) != "":
             return val
 
         env_key = f"PAICC_{key.upper()}"
         if env_key in os.environ:
             return os.environ[env_key]
 
-        if val is not None:
-            return val
         return default_val
 
     def set(self, key: str, value: Any) -> None:
@@ -103,6 +99,12 @@ class Settings:
             _db().set_setting(key, str(value))
         except Exception:
             # DB not ready yet — silently ignore (values survive via env/defaults)
+            pass
+
+    def delete(self, key: str) -> None:
+        try:
+            _db().delete_setting(key)
+        except Exception:
             pass
 
     def get_int(self, key: str, default: int = 0) -> int:
