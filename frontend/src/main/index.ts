@@ -94,6 +94,14 @@ function findBackendDir(): string {
 
 function findPython(): string {
   if (process.env.PAICC_PYTHON) return process.env.PAICC_PYTHON
+  // Prefer the project's bundled virtualenv so all backend dependencies
+  // (apscheduler, etc.) resolve regardless of what the system Python has.
+  const backendDir = findBackendDir()
+  const venvPython =
+    process.platform === 'win32'
+      ? join(backendDir, '.venv', 'Scripts', 'python.exe')
+      : join(backendDir, '.venv', 'bin', 'python')
+  if (existsSync(venvPython)) return venvPython
   return process.platform === 'win32' ? 'python' : 'python3'
 }
 
