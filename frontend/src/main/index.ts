@@ -16,6 +16,19 @@ let isQuitting = false
 let ballDragCursor: { x: number; y: number } | null = null
 let ballDragPos: number[] | null = null
 
+// Floating-ball geometry — MUST match the renderer constants in FloatingBall.tsx.
+const BALL_W = 360
+const BALL_H = 512
+const BALL_CX = 180 // ball centre x within the window
+const BALL_CY = 256 // ball centre y within the window (vertically centred)
+const BALL_STRIP = 14 // visible strip thickness when docked against an edge
+const BALL_SAFE = 40 // min distance the ball centre keeps from every edge when free
+const BALL_SNAP = 50 // drag within this of an edge → dock to a strip
+const BALL_TWEEN_MS = 200 // smooth slide duration for dock/undock
+let ballDocked = false
+let ballDockEdge: 'left' | 'right' | 'top' | 'bottom' | null = null
+let ballTween: ReturnType<typeof setInterval> | null = null
+
 const isDev = !app.isPackaged
 const rendererUrl = process.env['ELECTRON_RENDERER_URL']
 
@@ -159,6 +172,157 @@ function broadcast(channel: string, payload: unknown): void {
 }
 
 // ---------------------------------------------------------------------------
+// Floating-ball edge docking (collapse to a strip, expand on hover)
+// ---------------------------------------------------------------------------
+function ballScreenPos(): { x: number; y: number } {
+  if (!ballWindow) return { x: BALL_CX, y: BALL_CY }
+  const [x, y] = ballWindow.getPosition()
+  return { x: x + BALL_CX, y: y + BALL_CY }
+}
+
+function setBallScreenPos(x: number, y: number): void {
+  if (!ballWindow) return
+  ballWindow.setPosition(Math.round(x - BALL_CX), Math.round(y - BALL_CY))
+}
+
+// Smoothly slide the ball window to a target screen position (ease-in-out quad).
+function tweenBallToScreen(cx: number, cy: number, onDone?: () => void): void {
+  tweenBallTo(cx - BALL_CX, cy - BALL_CY, onDone)
+}
+
+function tweenBallTo(x: number, y: number, onDone?: () => void): void {
+  if (!ballWindow) {
+    onDone?.()
+    return
+  }
+  if (ballTween) clearInterval(ballTween)
+  const from = ballWindow.getPosition()
+  const start = Date.now()
+  const ease = (t: number): number => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2)
+  ballTween = setInterval(() => {
+    const t = Math.min(1, (Date.now() - start) / BALL_TWEEN_MS)
+    const nx = Math.round(from[0] + (x - from[0]) * ease(t))
+    const ny = Math.round(from[1] + (y - from[1]) * ease(t))
+    if (ballWindow && !ballWindow.isDestroyed()) ballWindow.setPosition(nx, ny)
+    if (t >= 1) {
+      if (ballTween) clearInterval(ballTween)
+      ballTween = null
+      onDone?.()
+    }
+  }, 16)
+}
+
+function workAreaAt(x: number, y: number): Electron.Rectangle {
+  return screen.getDisplayMatching({ x: Math.round(x), y: Math.round(y), width: 1, height: 1 })
+    .workArea
+}
+
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.min(Math.max(v, lo), hi)
+}
+
+// Safe bounds for a free ball: keeps the ball itself fully on-screen.
+function safeBounds(wa: Electron.Rectangle): { minX: number; maxX: number; minY: number; maxY: number } {
+  const cx = wa.x + wa.width / 2
+  const cy = wa.y + wa.height / 2
+  return {
+    minX: Math.min(wa.x + BALL_SAFE, cx),
+    maxX: Math.max(wa.x + wa.width - BALL_SAFE, cx),
+    minY: Math.min(wa.y + BALL_SAFE, cy),
+    maxY: Math.max(wa.y + wa.height - BALL_SAFE, cy),
+  }
+}
+
+function currentBallState(): {
+  docked: boolean
+  edge: 'left' | 'right' | 'top' | 'bottom' | null
+  ball: { x: number; y: number }
+  workArea: { x: number; y: number; width: number; height: number }
+} {
+  const ball = ballScreenPos()
+  const wa = workAreaAt(ball.x, ball.y)
+  return {
+    docked: ballDocked,
+    edge: ballDockEdge,
+    ball,
+    workArea: { x: wa.x, y: wa.y, width: wa.width, height: wa.height },
+  }
+}
+
+function broadcastBallState(): void {
+  if (ballWindow && !ballWindow.isDestroyed()) {
+    ballWindow.webContents.send('ball-state', currentBallState())
+  }
+}
+
+// Dock the ball so only a thin strip peeks out at the given screen edge. The strip
+// *is* the collapsed ball — it stays at the edge; the satellite menu orbits it.
+function dockBall(edge: 'left' | 'right' | 'top' | 'bottom'): void {
+  if (!ballWindow) return
+  const ball = ballScreenPos()
+  const wa = workAreaAt(ball.x, ball.y)
+  const { minX, maxX, minY, maxY } = safeBounds(wa)
+  let cx = ball.x
+  let cy = ball.y
+  if (edge === 'left') {
+    cx = wa.x + BALL_STRIP / 2
+    cy = clamp(ball.y, minY, maxY)
+  } else if (edge === 'right') {
+    cx = wa.x + wa.width - BALL_STRIP / 2
+    cy = clamp(ball.y, minY, maxY)
+  } else if (edge === 'top') {
+    cy = wa.y + BALL_STRIP / 2
+    cx = clamp(ball.x, minX, maxX)
+  } else {
+    cy = wa.y + wa.height - BALL_STRIP / 2
+    cx = clamp(ball.x, minX, maxX)
+  }
+  ballDocked = true
+  ballDockEdge = edge
+  broadcastBallState()
+  tweenBallToScreen(cx, cy, () => broadcastBallState())
+}
+
+// Restore the ball from a docked strip back to a free position inside the screen.
+function undockBall(): void {
+  const ball = ballScreenPos()
+  const wa = workAreaAt(ball.x, ball.y)
+  const { minX, maxX, minY, maxY } = safeBounds(wa)
+  const cx = clamp(ball.x, minX, maxX)
+  const cy = clamp(ball.y, minY, maxY)
+  ballDocked = false
+  ballDockEdge = null
+  broadcastBallState()
+  tweenBallToScreen(cx, cy, () => broadcastBallState())
+}
+
+// After a drag: dock to the nearest edge if close enough, otherwise keep it free
+// (clamped on-screen). Dragging a docked strip inward past the snap threshold
+// restores the ball.
+function snapBallAfterDrag(): void {
+  const ball = ballScreenPos()
+  const wa = workAreaAt(ball.x, ball.y)
+  const dl = ball.x - wa.x
+  const dr = wa.x + wa.width - ball.x
+  const dt = ball.y - wa.y
+  const db = wa.y + wa.height - ball.y
+  const min = Math.min(dl, dr, dt, db)
+  if (min < BALL_SNAP) {
+    const edge: 'left' | 'right' | 'top' | 'bottom' =
+      dl === min ? 'left' : dr === min ? 'right' : dt === min ? 'top' : 'bottom'
+    dockBall(edge)
+  } else if (ballDocked) {
+    undockBall()
+  } else {
+    const { minX, maxX, minY, maxY } = safeBounds(wa)
+    ballDocked = false
+    ballDockEdge = null
+    broadcastBallState()
+    tweenBallToScreen(clamp(ball.x, minX, maxX), clamp(ball.y, minY, maxY))
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Windows
 // ---------------------------------------------------------------------------
 function createMainWindow(): void {
@@ -190,8 +354,8 @@ function createMainWindow(): void {
 
 function createBallWindow(): void {
   ballWindow = new BrowserWindow({
-    width: 340,
-    height: 300,
+    width: BALL_W,
+    height: BALL_H,
     transparent: true,
     frame: false,
     resizable: false,
@@ -206,9 +370,10 @@ function createBallWindow(): void {
   })
   ballWindow.setAlwaysOnTop(true, 'screen-saver')
   loadRenderer(ballWindow, 'ball')
-  // Bottom-right corner by default.
-  const { width, height } = screen.getPrimaryDisplay().workArea
-  ballWindow.setPosition(width - 360, height - 320)
+  // Bottom-right corner by default, kept inside the safe region.
+  const wa = screen.getPrimaryDisplay().workArea
+  setBallScreenPos(wa.x + wa.width - 200, wa.y + wa.height - 150)
+  broadcastBallState()
 }
 
 function loadRenderer(win: BrowserWindow, view: 'main' | 'ball'): void {
@@ -264,6 +429,10 @@ function registerIpc(): void {
   // cannot use `-webkit-app-region: drag`).
   ipcMain.on('paicc:ball-drag-start', (_e, x: number, y: number) => {
     if (!ballWindow) return
+    if (ballTween) {
+      clearInterval(ballTween)
+      ballTween = null
+    }
     ballDragCursor = { x, y }
     ballDragPos = ballWindow.getPosition()
   })
@@ -276,7 +445,12 @@ function registerIpc(): void {
   ipcMain.on('paicc:ball-drag-end', () => {
     ballDragCursor = null
     ballDragPos = null
+    snapBallAfterDrag()
   })
+  ipcMain.on('paicc:set-ball-mouse-ignore', (_e, ignore: boolean) => {
+    ballWindow?.setIgnoreMouseEvents(Boolean(ignore), { forward: true })
+  })
+  ipcMain.handle('paicc:get-ball-state', () => currentBallState())
   ipcMain.on('paicc:window-minimize', (e) => BrowserWindow.fromWebContents(e.sender)?.minimize())
   ipcMain.on('paicc:window-hide', (e) => BrowserWindow.fromWebContents(e.sender)?.hide())
   ipcMain.on('paicc:ball-hide', () => ballWindow?.hide())

@@ -36,9 +36,13 @@ function AppIcon({ app, size }: { app: AppEntry; size: number }): JSX.Element {
 }
 
 const BALL_SIZE = 64
-const CENTER_X = 170
-const CENTER_Y = 256
-const RADIUS = 118
+const ORBIT_X = 180 // orbit centre x within the window (must match main-process BALL_CX)
+const ORBIT_Y = 256 // orbit centre y within the window (must match main-process BALL_CY)
+const RADIUS = 118 // outer ring radius (item centre distance)
+const INNER_R = 0.55 * RADIUS
+const ITEM_HALF = 22 // half of a 44px menu item, used for the on-screen margin
+const INTERACT_RADIUS = 40 // interactive radius around the ball/strip when idle
+const PANEL_RADIUS = RADIUS + ITEM_HALF + 20 // radius within which the open panel stays alive
 
 const MENU = [
   { key: '/', icon: <DashboardOutlined />, label: '系统' },
@@ -50,12 +54,68 @@ const MENU = [
   { key: '/settings', icon: <SettingOutlined />, label: '设置' },
 ]
 
-function anglePoint(deg: number): { left: number; top: number } {
-  const rad = (deg * Math.PI) / 180
-  return {
-    left: CENTER_X + RADIUS * Math.cos(rad) - 22,
-    top: CENTER_Y - RADIUS * Math.sin(rad) - 22,
+// Place an item at radius r and angle deg (0 = right, counter-clockwise) around the
+// orbit centre, keeping the item upright so its icon isn't rotated.
+function orbitTransform(deg: number, r: number): string {
+  return `rotate(${deg}deg) translate(${r}px) rotate(${-deg}deg)`
+}
+
+interface BallState {
+  docked: boolean
+  edge: 'left' | 'right' | 'top' | 'bottom' | null
+  ball: { x: number; y: number }
+  workArea: { x: number; y: number; width: number; height: number }
+}
+
+// Largest contiguous arc (in degrees) around the orbit centre where a menu item of
+// radius r stays fully inside the work area. full=true means the whole circle fits.
+function largestOnScreenArc(
+  ball: BallState['ball'],
+  wa: BallState['workArea'],
+  r: number,
+): { center: number; half: number; full: boolean } {
+  const ok: boolean[] = new Array(360).fill(false)
+  let allOk = true
+  for (let d = 0; d < 360; d++) {
+    const rad = (d * Math.PI) / 180
+    const px = ball.x + r * Math.cos(rad)
+    const py = ball.y - r * Math.sin(rad)
+    const good =
+      px >= wa.x + ITEM_HALF &&
+      px <= wa.x + wa.width - ITEM_HALF &&
+      py >= wa.y + ITEM_HALF &&
+      py <= wa.y + wa.height - ITEM_HALF
+    ok[d] = good
+    if (!good) allOk = false
   }
+  if (allOk) return { center: 90, half: 180, full: true }
+  // Longest contiguous run (with wrap-around) is the on-screen arc.
+  let bestLen = 0
+  let bestStart = 0
+  let len = 0
+  let start = 0
+  for (let i = 0; i < 720; i++) {
+    if (ok[i % 360]) {
+      if (len === 0) start = i
+      len++
+      if (len > bestLen) {
+        bestLen = len
+        bestStart = start % 360
+      }
+    } else {
+      len = 0
+    }
+  }
+  return { center: (bestStart + bestLen / 2) % 360, half: bestLen / 2, full: false }
+}
+
+// Spread n items evenly across the safe arc (or around the whole circle if full).
+function itemAngles(n: number, arc: { center: number; half: number; full: boolean }): number[] {
+  if (n <= 0) return []
+  if (arc.full) return Array.from({ length: n }, (_, i) => (i * 360) / n)
+  if (n === 1) return [arc.center]
+  const span = arc.half * 2
+  return Array.from({ length: n }, (_, i) => arc.center - arc.half + (span * i) / (n - 1))
 }
 
 export default function FloatingBall(): JSX.Element {
@@ -67,10 +127,21 @@ export default function FloatingBall(): JSX.Element {
   const [favorites, setFavorites] = useState<AppEntry[]>([])
   const [dragging, setDragging] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
+  const [ballState, setBallState] = useState<BallState | null>(null)
   const hoverTimer = useRef<number | null>(null)
   const dragResetTimer = useRef<number | null>(null)
   const noticeTimer = useRef<number | null>(null)
   const didDrag = useRef(false)
+  const interactiveRef = useRef(false)
+  const ballDraggingRef = useRef(false)
+
+  const docked = ballState?.docked ?? false
+  const edge = ballState?.edge ?? null
+  const arc = ballState
+    ? largestOnScreenArc(ballState.ball, ballState.workArea, RADIUS)
+    : { center: 90, half: 180, full: true }
+  const menuAngles = itemAngles(MENU.length, arc)
+  const favAngles = itemAngles(Math.min(favorites.length, 6), arc)
 
   const showNotice = useCallback((msg: string): void => {
     setNotice(msg)
@@ -89,7 +160,33 @@ export default function FloatingBall(): JSX.Element {
     loadFavorites()
   }, [loadFavorites])
 
-  // Alt+Space global shortcut toggles the quick-input panel.
+  // Pull the initial dock state, then track changes pushed from the main process.
+  useEffect(() => {
+    window.paicc
+      ?.getBallState()
+      .then((s) => setBallState(s))
+      .catch(() => {})
+    window.paicc?.onBallState((s) => setBallState(s))
+  }, [])
+
+  // Docking hides the ball and any open panel, and re-enables click-through so the
+  // transparent on-screen part of the window doesn't block clicks behind it.
+  useEffect(() => {
+    if (docked) {
+      setMenuOpen(false)
+      setInputOpen(false)
+      interactiveRef.current = false
+      window.paicc?.setBallMouseIgnore(true)
+    }
+  }, [docked])
+
+  // Start click-through; updatePointer re-enables interactivity over content.
+  useEffect(() => {
+    interactiveRef.current = false
+    window.paicc?.setBallMouseIgnore(true)
+  }, [])
+
+  // Alt+Space global shortcut toggles the quick-input panel (free state only).
   useEffect(() => {
     window.paicc?.onToggleInput(() => {
       setMenuOpen(false)
@@ -97,14 +194,43 @@ export default function FloatingBall(): JSX.Element {
     })
   }, [])
 
-  const onBallEnter = (): void => {
-    hoverTimer.current = window.setTimeout(() => setMenuOpen(true), 500)
+  // Track the cursor distance from the orbit centre (a fixed point in the window):
+  // keep the window interactive only over real content, and close the panel once the
+  // cursor strays past its radius. This also stops the transparent window from
+  // swallowing clicks over empty space.
+  const updatePointer = (x: number, y: number): void => {
+    if (ballDraggingRef.current) return
+    const dx = x - ORBIT_X
+    const dy = y - ORBIT_Y
+    const dist = Math.sqrt(dx * dx + dy * dy)
+    let wantInteractive: boolean
+    if (inputOpen) {
+      wantInteractive = true
+    } else if (menuOpen) {
+      wantInteractive = dist <= PANEL_RADIUS
+      if (dist > PANEL_RADIUS) setMenuOpen(false)
+    } else {
+      wantInteractive = dist <= INTERACT_RADIUS
+    }
+    if (wantInteractive !== interactiveRef.current) {
+      interactiveRef.current = wantInteractive
+      window.paicc?.setBallMouseIgnore(!wantInteractive)
+    }
   }
-  const onBallLeave = (): void => {
+
+  const onAnchorEnter = (): void => {
+    if (hoverTimer.current) window.clearTimeout(hoverTimer.current)
+    hoverTimer.current = window.setTimeout(() => setMenuOpen(true), 300)
+  }
+
+  const onAnchorLeave = (): void => {
     if (hoverTimer.current) window.clearTimeout(hoverTimer.current)
   }
+
   const onWinLeave = (): void => {
     setMenuOpen(false)
+    interactiveRef.current = false
+    window.paicc?.setBallMouseIgnore(true)
   }
 
   const send = async (): Promise<void> => {
@@ -156,7 +282,6 @@ export default function FloatingBall(): JSX.Element {
     e.preventDefault()
     e.dataTransfer.dropEffect = 'copy'
     if (!dragging) setDragging(true)
-    // Auto-hide if the drag is cancelled (Esc) or stalls without further events.
     if (dragResetTimer.current) window.clearTimeout(dragResetTimer.current)
     dragResetTimer.current = window.setTimeout(() => setDragging(false), 2500)
   }
@@ -213,6 +338,9 @@ export default function FloatingBall(): JSX.Element {
     const startX = e.screenX
     const startY = e.screenY
     didDrag.current = false
+    ballDraggingRef.current = true
+    if (hoverTimer.current) window.clearTimeout(hoverTimer.current)
+    setMenuOpen(false)
     window.paicc?.ballDragStart(startX, startY)
     const move = (ev: MouseEvent): void => {
       if (
@@ -224,6 +352,7 @@ export default function FloatingBall(): JSX.Element {
       window.paicc?.ballDragMove(ev.screenX, ev.screenY)
     }
     const up = (): void => {
+      ballDraggingRef.current = false
       window.paicc?.ballDragEnd()
       window.removeEventListener('mousemove', move)
       window.removeEventListener('mouseup', up)
@@ -232,10 +361,39 @@ export default function FloatingBall(): JSX.Element {
     window.addEventListener('mouseup', up)
   }
 
+  const onBallClick = (): void => {
+    if (didDrag.current) {
+      didDrag.current = false
+      return
+    }
+    // Docked strip: hover already opens the menu; clicking does nothing extra.
+    if (docked) return
+    setMenuOpen(false)
+    setInputOpen((v) => !v)
+  }
+
+  // The ball morphs into a thin strip when docked (same element, animated by CSS).
+  const ballStyle: React.CSSProperties = (() => {
+    if (!docked || !edge) {
+      return {
+        left: ORBIT_X - BALL_SIZE / 2,
+        top: ORBIT_Y - BALL_SIZE / 2,
+        width: BALL_SIZE,
+        height: BALL_SIZE,
+        borderRadius: '50%',
+      }
+    }
+    if (edge === 'left' || edge === 'right') {
+      return { left: ORBIT_X - 7, top: ORBIT_Y - 32, width: 14, height: 64, borderRadius: 7 }
+    }
+    return { left: ORBIT_X - 32, top: ORBIT_Y - 7, width: 64, height: 14, borderRadius: 7 }
+  })()
+
   return (
     <div
       className={`ball-root${dragging ? ' dragging' : ''}`}
       onMouseLeave={onWinLeave}
+      onMouseMove={(e) => updatePointer(e.clientX, e.clientY)}
       onDragOver={onDragOver}
       onDragEnter={onDragEnter}
       onDragLeave={onDragLeave}
@@ -244,19 +402,18 @@ export default function FloatingBall(): JSX.Element {
     >
       {dragging && <div className="ball-drop-hint">松开以添加到快捷启动</div>}
       {notice && <div className="ball-notice">{notice}</div>}
-      <div className="ball-quit" title="退出 PAICC" onClick={() => window.paicc?.quitApp()}>
-        <PoweroffOutlined />
-      </div>
+
+      {/* Satellite ring: items orbit the ball and auto-avoid off-screen angles. */}
       {menuOpen && !inputOpen && (
         <>
           {MENU.map((item, i) => {
-            const p = anglePoint(150 - i * 20)
+            const deg = menuAngles[i] ?? 0
             return (
               <div
                 key={item.key}
                 className="radial-item"
                 title={item.label}
-                style={{ left: p.left, top: p.top }}
+                style={{ left: ORBIT_X - 22, top: ORBIT_Y - 22, transform: orbitTransform(deg, RADIUS) }}
                 onClick={() => window.paicc?.openRoute(item.key)}
               >
                 {item.icon}
@@ -265,16 +422,20 @@ export default function FloatingBall(): JSX.Element {
           })}
           {/* Inner ring: favorite apps quick-launch */}
           {favorites.slice(0, 6).map((app, i) => {
-            const p = anglePoint(150 - i * 20)
-            const innerR = 0.55
-            const left = CENTER_X + (p.left + 22 - CENTER_X) * innerR - 16
-            const top = CENTER_Y + (p.top + 22 - CENTER_Y) * innerR - 16
+            const deg = favAngles[i] ?? 0
             return (
               <div
                 key={app.id}
                 className="radial-item"
                 title={`${app.name}（右键移除）`}
-                style={{ left, top, width: 32, height: 32, fontSize: 12 }}
+                style={{
+                  left: ORBIT_X - 16,
+                  top: ORBIT_Y - 16,
+                  width: 32,
+                  height: 32,
+                  fontSize: 12,
+                  transform: orbitTransform(deg, INNER_R),
+                }}
                 onClick={() => launch(app.id)}
                 onContextMenu={(e) => {
                   e.preventDefault()
@@ -288,7 +449,7 @@ export default function FloatingBall(): JSX.Element {
         </>
       )}
 
-      {inputOpen && (
+      {!docked && inputOpen && (
         <>
           {history.length > 0 && (
             <div className="ball-answer" style={{ left: 20, top: 12 }}>
@@ -325,24 +486,25 @@ export default function FloatingBall(): JSX.Element {
         </>
       )}
 
-      <div
-        className="ball"
-        style={{ left: CENTER_X - BALL_SIZE / 2, top: CENTER_Y - BALL_SIZE / 2 }}
-        onMouseEnter={onBallEnter}
-        onMouseLeave={onBallLeave}
-        onMouseDown={onBallMouseDown}
-        onClick={() => {
-          if (didDrag.current) {
-            didDrag.current = false
-            return
-          }
-          setMenuOpen(false)
-          setInputOpen((v) => !v)
-        }}
-      >
-        <div className="ball-inner">
-          {loading ? <span style={{ fontSize: 12 }}>…</span> : <CommentOutlined />}
+      {!docked && (
+        <div className="ball-quit" title="退出 PAICC" onClick={() => window.paicc?.quitApp()}>
+          <PoweroffOutlined />
         </div>
+      )}
+
+      <div
+        className={`ball${docked ? ' docked' : ''}`}
+        style={ballStyle}
+        onMouseEnter={onAnchorEnter}
+        onMouseLeave={onAnchorLeave}
+        onMouseDown={onBallMouseDown}
+        onClick={onBallClick}
+      >
+        {!docked && (
+          <div className="ball-inner">
+            {loading ? <span style={{ fontSize: 12 }}>…</span> : <CommentOutlined />}
+          </div>
+        )}
       </div>
     </div>
   )

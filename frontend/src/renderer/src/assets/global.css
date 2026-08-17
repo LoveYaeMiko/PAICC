@@ -84,13 +84,33 @@ body,
   justify-content: center;
   cursor: grab;
   -webkit-app-region: no-drag;
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  transition:
+    transform 0.2s ease,
+    box-shadow 0.2s ease,
+    left 0.25s ease,
+    top 0.25s ease,
+    width 0.25s ease,
+    height 0.25s ease,
+    border-radius 0.25s ease;
   animation: breathe 3s ease-in-out infinite;
 }
 
 .ball:hover {
   transform: scale(1.08);
   box-shadow: 0 6px 32px rgba(74, 144, 226, 0.8);
+}
+
+/* Docked: the ball morphs into a thin strip that stays at the screen edge. */
+.ball.docked {
+  animation: none;
+  background: rgba(74, 144, 226, 0.85);
+  box-shadow: 0 0 10px rgba(74, 144, 226, 0.55);
+}
+
+.ball.docked:hover {
+  transform: none;
+  background: var(--paicc-accent);
+  box-shadow: 0 0 14px rgba(74, 144, 226, 0.9);
 }
 
 .ball-inner {
@@ -136,13 +156,13 @@ body,
   cursor: pointer;
   pointer-events: auto;
   -webkit-app-region: no-drag;
-  transition: transform 0.15s ease, background 0.15s ease;
+  transition: transform 0.25s ease, background 0.15s ease, color 0.15s ease;
 }
 
 .radial-item:hover {
   background: var(--paicc-accent);
   color: #fff;
-  transform: scale(1.12);
+  box-shadow: 0 0 12px rgba(74, 144, 226, 0.6);
 }
 
 /* Input box beside the ball */
@@ -217,9 +237,9 @@ body,
 
 .ball-quit {
   position: absolute;
-  /* Sit directly to the right of the ball (ball spans x 138–202, y 224–288),
+  /* Sit directly to the right of the ball (ball spans x 148–212, y 224–288),
      vertically centred, instead of floating at the window's top-right corner. */
-  left: 208px;
+  left: 218px;
   top: 243px;
   width: 26px;
   height: 26px;
