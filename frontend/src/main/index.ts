@@ -465,7 +465,17 @@ function registerIpc(): void {
   })
   ipcMain.handle('paicc:get-auto-launch', () => app.getLoginItemSettings().openAtLogin)
   ipcMain.handle('paicc:set-auto-launch', (_e, openAtLogin: boolean) => {
-    app.setLoginItemSettings({ openAtLogin: Boolean(openAtLogin) })
+    const settings: Electron.Settings = { openAtLogin: Boolean(openAtLogin) }
+    // In dev the login item is the bare Electron binary, which carries no app path:
+    // on boot Windows would launch Electron's default "run a local app" screen.
+    // Point it at the project root so it relaunches the real app — package.json's
+    // "main" resolves to out/main/index.js, and out/renderer/index.html serves the UI
+    // (no dev server needed). Packaged builds need no such fix.
+    if (!app.isPackaged && settings.openAtLogin) {
+      settings.path = process.execPath
+      settings.args = [app.getAppPath()]
+    }
+    app.setLoginItemSettings(settings)
     return app.getLoginItemSettings().openAtLogin
   })
 }
