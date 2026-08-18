@@ -171,6 +171,76 @@ export interface QuantProcessInfo {
   running_time: number
 }
 
+export interface ShadowEquity {
+  latest: number
+  final_cash: number
+  total_return: number
+  annualized_return: number
+  sharpe: number
+  max_drawdown: number
+  n_days: number
+  n_fills: number
+  total_commission: number
+}
+
+export interface ShadowPosition {
+  symbol: string
+  shares: number
+  weight: number
+  side: string
+}
+
+export interface S7Params {
+  amplitude: number
+  zscore_threshold: number
+  freeze_days: number
+  slippage_bps: number
+  commission_bps: number
+}
+
+export interface ShadowRedLine {
+  name: string
+  value: number | boolean | null
+  level?: string
+  threshold?: number
+  critical?: number
+  detail?: string
+}
+
+export interface ShadowStatus {
+  as_of: string
+  last_run: string
+  last_trading_date: string
+  data_freshness_days: number
+  equity: ShadowEquity
+  positions: ShadowPosition[]
+  s7_params: S7Params
+  refreshed: Record<string, unknown>
+  red_lines: ShadowRedLine[]
+}
+
+export interface S7Calibration {
+  as_of: string
+  last_run: string
+  window: { start: string; end: string }
+  cost: Record<string, unknown>
+  amplitude: Record<string, unknown>
+  sentiment: Record<string, unknown>
+  recommendations: Record<string, unknown>
+  auto_apply: boolean
+  applied: { changed: Record<string, { old: string; new: string }>; unchanged: string[] }
+}
+
+export interface QuantScheduleStatus {
+  shadow_daily_time: string
+  calibrate_time: string
+  shadow_auto_email: boolean
+  scheduler_running: boolean
+  last_shadow_run: Record<string, unknown> | null
+  last_calibration_run: Record<string, unknown> | null
+}
+
+
 export interface ResearchDoc {
   id: number
   title: string

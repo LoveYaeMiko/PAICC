@@ -1,5 +1,8 @@
 import {
+  CalculatorOutlined,
+  ExperimentOutlined,
   FolderOpenOutlined,
+  LineChartOutlined,
   PlayCircleOutlined,
   ReloadOutlined,
   SaveOutlined,
@@ -10,6 +13,7 @@ import {
   Button,
   Card,
   Col,
+  Descriptions,
   Empty,
   Form,
   Input,
@@ -17,6 +21,7 @@ import {
   Select,
   Space,
   Spin,
+  Statistic,
   Table,
   Tag,
   Typography,
@@ -31,9 +36,13 @@ import type {
   QuantCommand,
   QuantProcessInfo,
   QuantProject,
+  QuantScheduleStatus,
   RedLine,
   RedLineLevel,
   RedLineStatus,
+  S7Calibration,
+  ShadowPosition,
+  ShadowStatus,
 } from '@/types'
 
 interface DetectResult {
@@ -103,6 +112,16 @@ function formatTime(ts: number | null | undefined): string {
   return new Date(ms).toLocaleString()
 }
 
+function formatRatio(v: number | null | undefined): string {
+  if (v == null) return '—'
+  return `${(v * 100).toFixed(2)}%`
+}
+
+function formatMoney(v: number | null | undefined): string {
+  if (v == null) return '—'
+  return v.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
 function isErrorLine(line: string): boolean {
   return /(error|trace|错误)/i.test(line)
 }
@@ -133,6 +152,70 @@ function RedLineCard({ redLine }: { redLine: RedLine }): JSX.Element {
     </Card>
   )
 }
+
+function asStr(v: unknown): string {
+  if (v == null) return '—'
+  if (typeof v === 'object') return JSON.stringify(v)
+  return String(v)
+}
+
+function fmtSent(v: unknown): string {
+  if (v && typeof v === 'object') {
+    const o = v as Record<string, unknown>
+    return `z=${o.zscore_threshold ?? '—'}, freeze=${o.freeze_days ?? '—'}`
+  }
+  return asStr(v)
+}
+
+function fmtCost(v: unknown): string {
+  if (v && typeof v === 'object') {
+    const o = v as Record<string, unknown>
+    return `佣金 ${o.commission_bps ?? '—'} bps`
+  }
+  return asStr(v)
+}
+
+function CalibrationOverview({ cal }: { cal: S7Calibration }): JSX.Element {
+  const item = (label: string, cur: string, rec: string): JSX.Element => (
+    <Descriptions.Item label={label}>
+      <span style={{ color: '#8a93a6' }}>{cur}</span>
+      <span style={{ margin: '0 8px' }}>→</span>
+      <span style={{ color: '#52c41a', fontWeight: 600 }}>{rec}</span>
+    </Descriptions.Item>
+  )
+  return (
+    <Descriptions size="small" column={1} bordered>
+      {item('PEAD 倾斜幅度', asStr(cal.amplitude?.current), asStr(cal.amplitude?.recommended))}
+      {item('舆情阈值', fmtSent(cal.sentiment?.current), fmtSent(cal.sentiment?.recommended))}
+      {item('交易成本模型', fmtCost(cal.cost?.current), fmtCost(cal.cost?.recommended))}
+    </Descriptions>
+  )
+}
+
+const positionColumns: TableColumnsType<ShadowPosition> = [
+  { title: '标的', dataIndex: 'symbol', key: 'symbol', className: 'mono' },
+  {
+    title: '股数',
+    dataIndex: 'shares',
+    key: 'shares',
+    align: 'right',
+    render: (v: number) => (v == null ? '—' : v.toLocaleString('zh-CN')),
+  },
+  {
+    title: '权重',
+    dataIndex: 'weight',
+    key: 'weight',
+    align: 'right',
+    render: (v: number) => formatRatio(v),
+  },
+  {
+    title: '方向',
+    dataIndex: 'side',
+    key: 'side',
+    width: 90,
+    render: (v: string) => <Tag color={v === 'short' ? 'orange' : 'green'}>{v ?? '—'}</Tag>,
+  },
+]
 
 const projectColumns: TableColumnsType<QuantProject> = [
   { title: '名称', dataIndex: 'name', key: 'name' },
@@ -218,6 +301,14 @@ export default function QuantPage(): JSX.Element {
   const [configLoading, setConfigLoading] = useState(false)
   const [configSaving, setConfigSaving] = useState(false)
 
+  const [shadow, setShadow] = useState<ShadowStatus | null>(null)
+  const [shadowLoading, setShadowLoading] = useState(true)
+  const [calibration, setCalibration] = useState<S7Calibration | null>(null)
+  const [calibrationLoading, setCalibrationLoading] = useState(true)
+  const [schedule, setSchedule] = useState<QuantScheduleStatus | null>(null)
+  const [runningShadow, setRunningShadow] = useState(false)
+  const [runningCalibration, setRunningCalibration] = useState(false)
+
   const [form] = Form.useForm<{ root_path: string; name: string }>()
   const logRef = useRef<HTMLPreElement>(null)
 
@@ -276,13 +367,47 @@ export default function QuantPage(): JSX.Element {
     }
   }, [])
 
+  const refreshShadow = useCallback(async (): Promise<void> => {
+    try {
+      const { data } = await api.get<ShadowStatus | null>('/quant/shadow')
+      setShadow(data ?? null)
+    } catch {
+      setShadow(null)
+    } finally {
+      setShadowLoading(false)
+    }
+  }, [])
+
+  const refreshCalibration = useCallback(async (): Promise<void> => {
+    try {
+      const { data } = await api.get<S7Calibration | null>('/quant/calibration')
+      setCalibration(data ?? null)
+    } catch {
+      setCalibration(null)
+    } finally {
+      setCalibrationLoading(false)
+    }
+  }, [])
+
+  const refreshSchedule = useCallback(async (): Promise<void> => {
+    try {
+      const { data } = await api.get<QuantScheduleStatus>('/quant/schedule')
+      setSchedule(data ?? null)
+    } catch {
+      setSchedule(null)
+    }
+  }, [])
+
   useEffect(() => {
     void refreshStatus()
     void refreshProjects()
     void refreshProcesses()
     void refreshCommands()
     void refreshLogs()
-  }, [refreshStatus, refreshProjects, refreshProcesses, refreshCommands, refreshLogs])
+    void refreshShadow()
+    void refreshCalibration()
+    void refreshSchedule()
+  }, [refreshStatus, refreshProjects, refreshProcesses, refreshCommands, refreshLogs, refreshShadow, refreshCalibration, refreshSchedule])
 
   const onRedLineAlert = useCallback(() => {
     void refreshStatus()
@@ -308,9 +433,21 @@ export default function QuantPage(): JSX.Element {
     }
   }, [])
 
+  const onQuantShadowRan = useCallback(() => {
+    void refreshShadow()
+    void refreshSchedule()
+  }, [refreshShadow, refreshSchedule])
+
+  const onQuantCalibrated = useCallback(() => {
+    void refreshCalibration()
+    void refreshSchedule()
+  }, [refreshCalibration, refreshSchedule])
+
   useWsEvent('red_line_alert', onRedLineAlert)
   useWsEvent('log_line', onLogLine)
   useWsEvent('quant_processes', onQuantProcesses)
+  useWsEvent('quant_shadow_ran', onQuantShadowRan)
+  useWsEvent('quant_calibrated', onQuantCalibrated)
 
   useEffect(() => {
     const el = logRef.current
@@ -447,6 +584,38 @@ export default function QuantPage(): JSX.Element {
     }
   }
 
+  const handleRunShadow = async (): Promise<void> => {
+    const confirmationId = await confirmOperation('run_quant_shadow', '运行影子模式', {
+      note: '在 FQA 项目根目录执行 python cli.py shadow，回补 2026-01-01 至今的逐日目标持仓与 PnL',
+    })
+    if (!confirmationId) return
+    setRunningShadow(true)
+    try {
+      await api.post('/quant/shadow/run', { confirmation_id: confirmationId })
+      notification.success({ message: '影子模式已启动', description: '后台运行中，完成后将自动刷新并推送日报' })
+    } catch (err) {
+      notification.error({ message: '启动失败', description: describeError(err) })
+    } finally {
+      setRunningShadow(false)
+    }
+  }
+
+  const handleRunCalibration = async (): Promise<void> => {
+    const confirmationId = await confirmOperation('run_quant_calibrate', '运行 §7 回校', {
+      note: '在 FQA 项目根目录执行 python cli.py calibrate，回校 PEAD 幅度 / 舆情阈值 / 成本模型并自动写回 master_config.yaml',
+    })
+    if (!confirmationId) return
+    setRunningCalibration(true)
+    try {
+      await api.post('/quant/calibrate/run', { confirmation_id: confirmationId })
+      notification.success({ message: '回校已启动', description: '后台运行中，完成后将自动刷新并推送报告' })
+    } catch (err) {
+      notification.error({ message: '启动失败', description: describeError(err) })
+    } finally {
+      setRunningCalibration(false)
+    }
+  }
+
   const commandColumns: TableColumnsType<QuantCommand> = [
     { title: '名称', dataIndex: 'name', key: 'name' },
     {
@@ -534,6 +703,137 @@ export default function QuantPage(): JSX.Element {
                 </Col>
               ))}
             </Row>
+          </Space>
+        )}
+      </Card>
+
+      <Card
+        title="影子模式（长期测试）"
+        extra={
+          <Space size={8}>
+            {schedule ? (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                工作日 {schedule.shadow_daily_time} · 校准周六 {schedule.calibrate_time}
+                {schedule.scheduler_running ? '' : '（未启动）'}
+              </Typography.Text>
+            ) : null}
+            <Button
+              size="small"
+              type="primary"
+              icon={<LineChartOutlined />}
+              loading={runningShadow}
+              onClick={() => void handleRunShadow()}
+            >
+              立即运行
+            </Button>
+            <Button size="small" icon={<ReloadOutlined />} onClick={() => void refreshShadow()}>
+              刷新
+            </Button>
+          </Space>
+        }
+      >
+        {shadowLoading ? (
+          <Spin />
+        ) : shadow == null ? (
+          <Empty description="尚未运行影子模式 — 点击「立即运行」回补 2026-01-01 至今" />
+        ) : (
+          <Space direction="vertical" style={{ width: '100%' }} size={12}>
+            <Row gutter={[12, 12]}>
+              <Col xs={12} sm={8} md={4}>
+                <Statistic title="最新净值" value={shadow.equity?.latest ?? 0} precision={2} />
+              </Col>
+              <Col xs={12} sm={8} md={4}>
+                <Statistic title="累计收益" value={formatRatio(shadow.equity?.total_return)} />
+              </Col>
+              <Col xs={12} sm={8} md={4}>
+                <Statistic title="Sharpe" value={shadow.equity?.sharpe ?? 0} precision={2} />
+              </Col>
+              <Col xs={12} sm={8} md={4}>
+                <Statistic title="最大回撤" value={formatRatio(shadow.equity?.max_drawdown)} />
+              </Col>
+              <Col xs={12} sm={8} md={4}>
+                <Statistic title="数据新鲜度" value={shadow.data_freshness_days ?? 0} suffix="天" />
+              </Col>
+              <Col xs={12} sm={8} md={4}>
+                <Statistic title="成交笔数" value={shadow.equity?.n_fills ?? 0} />
+              </Col>
+            </Row>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              观察日期：{shadow.last_trading_date ?? shadow.as_of} · 上次运行：{shadow.last_run}
+            </Typography.Text>
+            <Descriptions size="small" column={{ xs: 2, sm: 3, md: 5 }} bordered>
+              <Descriptions.Item label="PEAD 幅度">{shadow.s7_params?.amplitude ?? '—'}</Descriptions.Item>
+              <Descriptions.Item label="舆情 z 阈值">{shadow.s7_params?.zscore_threshold ?? '—'}</Descriptions.Item>
+              <Descriptions.Item label="冻结天数">{shadow.s7_params?.freeze_days ?? '—'}</Descriptions.Item>
+              <Descriptions.Item label="冲击 bps">{shadow.s7_params?.slippage_bps ?? '—'}</Descriptions.Item>
+              <Descriptions.Item label="佣金 bps">{shadow.s7_params?.commission_bps ?? '—'}</Descriptions.Item>
+            </Descriptions>
+            <Typography.Text strong>当日 TopN 目标持仓</Typography.Text>
+            <Table<ShadowPosition>
+              rowKey={(r) => r.symbol}
+              columns={positionColumns}
+              dataSource={shadow.positions ?? []}
+              size="small"
+              pagination={false}
+              scroll={{ y: 240 }}
+            />
+          </Space>
+        )}
+      </Card>
+
+      <Card
+        title="§7 三项回校"
+        extra={
+          <Space size={8}>
+            <Button
+              size="small"
+              type="primary"
+              icon={<ExperimentOutlined />}
+              loading={runningCalibration}
+              onClick={() => void handleRunCalibration()}
+            >
+              运行校准
+            </Button>
+            <Button size="small" icon={<ReloadOutlined />} onClick={() => void refreshCalibration()}>
+              刷新
+            </Button>
+          </Space>
+        }
+      >
+        {calibrationLoading ? (
+          <Spin />
+        ) : calibration == null ? (
+          <Empty description="尚未运行回校 — 用积累的真实时点数据校准 §7 三项" />
+        ) : (
+          <Space direction="vertical" style={{ width: '100%' }} size={12}>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              回校窗口：{calibration.window?.start} ~ {calibration.window?.end} · 自动写回：
+              {calibration.auto_apply ? '是' : '否'} · 运行时间：{calibration.last_run}
+            </Typography.Text>
+            <CalibrationOverview cal={calibration} />
+            {calibration.applied?.changed && Object.keys(calibration.applied.changed).length > 0 ? (
+              <Table
+                rowKey={(r) => r.path}
+                size="small"
+                pagination={false}
+                dataSource={Object.entries(calibration.applied.changed).map(([path, kv]) => ({
+                  path,
+                  old: kv.old,
+                  new: kv.new,
+                }))}
+                columns={[
+                  { title: '配置项', dataIndex: 'path', key: 'path', className: 'mono' },
+                  { title: '旧值', dataIndex: 'old', key: 'old', className: 'mono' },
+                  {
+                    title: '新值',
+                    dataIndex: 'new',
+                    key: 'new',
+                    className: 'mono',
+                    render: (v: string) => <Tag color="green">{v}</Tag>,
+                  },
+                ]}
+              />
+            ) : null}
           </Space>
         )}
       </Card>

@@ -202,8 +202,9 @@ def get_status() -> dict[str, Any]:
         if data is not None:
             return _build_status(data, source=f"script:{script}", timestamp=timestamp)
 
-    # (b) dashboard JSON files
-    for rel in ("outputs/phase10_dashboard.json", "data/red_lines.json"):
+    # (b) dashboard JSON files (shadow_status.json feeds the four red lines from
+    # the real shadow-mode run so the dashboard stops showing "unknown").
+    for rel in ("outputs/phase10_dashboard.json", "data/red_lines.json", "outputs/shadow_status.json"):
         path = root / rel
         if path.is_file():
             data = _parse_json_file(path)
@@ -738,6 +739,73 @@ def _restart_tracked(project_id: int | None) -> list[int]:
             }
         new_pids.append(proc.pid)
     return new_pids
+
+
+# --------------------------------------------------------------------------- #
+# Synchronous command runner + shadow/calibration outputs
+# --------------------------------------------------------------------------- #
+def run_project_command(command: str, timeout: int = 1800) -> dict[str, Any]:
+    """Run ``command`` synchronously in the quant project root and capture output.
+
+    Unlike :func:`run_command` (async ``Popen`` for the panel), this blocks until
+    the process exits — used by the shadow/calibrate scheduler jobs. The child
+    (FQA CLI) writes UTF-8, so capture with an explicit ``utf-8`` codec.
+    """
+    root = _project_root()
+    try:
+        proc = subprocess.run(
+            command,
+            shell=True,
+            cwd=root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "command": command,
+            "returncode": None,
+            "stdout": (exc.stdout or "") if isinstance(exc.stdout, str) else "",
+            "stderr": (str(exc.stderr) if exc.stderr else "") + f"\n(timeout after {timeout}s)",
+            "timeout": True,
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("run_project_command failed")
+        return {"command": command, "returncode": None, "stdout": "",
+                "stderr": f"{type(exc).__name__}: {exc}", "timeout": False}
+    return {
+        "command": command,
+        "returncode": proc.returncode,
+        "stdout": proc.stdout or "",
+        "stderr": proc.stderr or "",
+        "timeout": False,
+    }
+
+
+def read_shadow_status() -> dict[str, Any] | None:
+    """Parse the FQA ``outputs/shadow_status.json`` (emitted by ``cli.py shadow``)."""
+    root = Path(_project_root())
+    for rel in ("outputs/shadow_status.json", "shadow_status.json"):
+        path = root / rel
+        if path.is_file():
+            data = _parse_json_file(path)
+            if isinstance(data, dict):
+                return data
+    return None
+
+
+def read_s7_calibration() -> dict[str, Any] | None:
+    """Parse the FQA ``outputs/s7_calibration.json`` (emitted by ``cli.py calibrate``)."""
+    root = Path(_project_root())
+    for rel in ("outputs/s7_calibration.json", "s7_calibration.json"):
+        path = root / rel
+        if path.is_file():
+            data = _parse_json_file(path)
+            if isinstance(data, dict):
+                return data
+    return None
 
 
 # --------------------------------------------------------------------------- #

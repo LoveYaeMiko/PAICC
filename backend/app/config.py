@@ -34,6 +34,10 @@ DEFAULTS: dict[str, Any] = {
     "quant_config_file": "configs/master_config.yaml",
     "quant_log_dir": "logs",
     "quant_dashboard_script": "",
+    # Quant shadow/calibration scheduler (weekday EOD + weekly calibration)
+    "quant_shadow_daily_time": "17:30",
+    "quant_calibrate_time": "18:00",
+    "quant_shadow_auto_email": "true",
     # LLM
     "llm_provider": "deepseek",
     "llm_model": "deepseek-chat",

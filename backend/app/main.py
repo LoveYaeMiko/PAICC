@@ -40,6 +40,7 @@ ROUTER_MODULES = [
 BACKGROUND_SERVICES = [
     ("app.services.system_monitor", "start"),
     ("app.services.quant_manager", "start"),
+    ("app.services.quant_scheduler", "start_scheduler"),
     ("app.services.storage_analysis", "start_scheduler"),
     ("app.services.paper_service", "start_scheduler"),
     ("app.services.claude_code", "start"),

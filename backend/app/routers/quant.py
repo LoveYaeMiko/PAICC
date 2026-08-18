@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from app.config import settings
 from app.deps import require_confirmation
-from app.services import quant_manager
+from app.services import quant_manager, quant_scheduler, task_manager
 
 router = APIRouter(prefix="/quant", tags=["quant"])
 
@@ -48,6 +48,14 @@ class SaveConfigRequest(BaseModel):
 class SaveReportRequest(BaseModel):
     title: str
     content: str
+
+
+class RunShadowRequest(BaseModel):
+    confirmation_id: str | None = None
+
+
+class RunCalibrationRequest(BaseModel):
+    confirmation_id: str | None = None
 
 
 @router.get("/projects")
@@ -146,3 +154,37 @@ def save_report(payload: SaveReportRequest) -> dict[str, Any]:
 @router.get("/logs")
 def tail_log(lines: int = 100) -> list[str]:
     return quant_manager.tail_log(lines)
+
+
+@router.get("/shadow")
+def shadow_status() -> dict[str, Any] | None:
+    """Latest shadow-mode status (净值/PnL/持仓/红线), or None before the first run."""
+    return quant_manager.read_shadow_status()
+
+
+@router.get("/calibration")
+def calibration_result() -> dict[str, Any] | None:
+    """Latest §7 calibration result (PEAD 幅度/舆情阈值/成本模型), or None."""
+    return quant_manager.read_s7_calibration()
+
+
+@router.get("/schedule")
+def schedule_status() -> dict[str, Any]:
+    """Quant scheduler configuration + last-run summaries."""
+    return quant_scheduler.get_status()
+
+
+@router.post("/shadow/run")
+def run_shadow(payload: RunShadowRequest) -> dict[str, Any]:
+    """Trigger the shadow-mode daily run in the background (confirmed)."""
+    require_confirmation(payload.confirmation_id, action="run_quant_shadow")
+    task_id = task_manager.start_task("quant_shadow_run", quant_scheduler.run_shadow_daily)
+    return {"task_id": task_id, "status": "started"}
+
+
+@router.post("/calibrate/run")
+def run_calibrate(payload: RunCalibrationRequest) -> dict[str, Any]:
+    """Trigger the §7 calibration run in the background (confirmed)."""
+    require_confirmation(payload.confirmation_id, action="run_quant_calibrate")
+    task_id = task_manager.start_task("quant_calibration_run", quant_scheduler.run_calibration)
+    return {"task_id": task_id, "status": "started"}
