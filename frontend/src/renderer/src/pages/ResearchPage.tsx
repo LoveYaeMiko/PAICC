@@ -1,4 +1,12 @@
-import { DeleteOutlined, ImportOutlined, ReloadOutlined, SaveOutlined } from '@ant-design/icons'
+import {
+  DeleteOutlined,
+  DownloadOutlined,
+  EyeOutlined,
+  ImportOutlined,
+  MailOutlined,
+  ReloadOutlined,
+  SaveOutlined,
+} from '@ant-design/icons'
 import {
   Button,
   Card,
@@ -18,7 +26,9 @@ import type { TableColumnsType } from 'antd'
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '@/services/api'
 import { confirmOperation } from '@/services/confirm'
-import type { ResearchDoc } from '@/types'
+import { useWsEvent } from '@/services/ws'
+import Markdown from '@/components/Markdown'
+import type { Paper, PaperReport, PaperStatus, ResearchDoc } from '@/types'
 
 interface SearchResult {
   title: string
@@ -68,6 +78,14 @@ export default function ResearchPage(): JSX.Element {
   const [reportContent, setReportContent] = useState('')
   const [generating, setGenerating] = useState(false)
   const [savingToKb, setSavingToKb] = useState(false)
+
+  const [papers, setPapers] = useState<Paper[]>([])
+  const [papersLoading, setPapersLoading] = useState(false)
+  const [reports, setReports] = useState<PaperReport[]>([])
+  const [paperStatus, setPaperStatus] = useState<PaperStatus | null>(null)
+  const [running, setRunning] = useState(false)
+  const [viewingReport, setViewingReport] = useState<PaperReport | null>(null)
+  const [sendingId, setSendingId] = useState<number | null>(null)
 
   const refreshDocs = useCallback(async (): Promise<void> => {
     try {
@@ -175,6 +193,279 @@ export default function ResearchPage(): JSX.Element {
       setSavingToKb(false)
     }
   }
+
+  const refreshPapers = useCallback(async (): Promise<void> => {
+    setPapersLoading(true)
+    try {
+      const { data } = await api.get<Paper[]>('/papers', { params: { limit: 200 } })
+      setPapers(Array.isArray(data) ? data : [])
+    } catch {
+      setPapers([])
+    } finally {
+      setPapersLoading(false)
+    }
+  }, [])
+
+  const refreshReports = useCallback(async (): Promise<void> => {
+    try {
+      const { data } = await api.get<PaperReport[]>('/papers/reports')
+      setReports(Array.isArray(data) ? data : [])
+    } catch {
+      setReports([])
+    }
+  }, [])
+
+  const refreshPaperStatus = useCallback(async (): Promise<void> => {
+    try {
+      const { data } = await api.get<PaperStatus>('/papers/status')
+      setPaperStatus(data)
+    } catch {
+      /* noop */
+    }
+  }, [])
+
+  useEffect(() => {
+    void refreshPapers()
+    void refreshReports()
+    void refreshPaperStatus()
+  }, [refreshPapers, refreshReports, refreshPaperStatus])
+
+  useWsEvent('paper_digest', () => {
+    void refreshPapers()
+    void refreshReports()
+    void refreshPaperStatus()
+  })
+
+  const runDaily = async (): Promise<void> => {
+    setRunning(true)
+    try {
+      await api.post('/papers/run')
+      notification.success({
+        message: '已开始抓取',
+        description: '正在后台抓取论文并生成综述，完成后会自动刷新。',
+      })
+    } catch (err) {
+      notification.error({ message: '启动失败', description: describeError(err) })
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  const viewReport = async (r: PaperReport): Promise<void> => {
+    try {
+      const { data } = await api.get<PaperReport>(`/papers/reports/${r.id}`)
+      setViewingReport({ ...r, ...data })
+    } catch (err) {
+      notification.error({ message: '加载失败', description: describeError(err) })
+    }
+  }
+
+  const sendReportEmail = async (r: PaperReport): Promise<void> => {
+    setSendingId(r.id)
+    try {
+      const { data } = await api.post<{ ok: boolean; error?: string }>(
+        `/papers/reports/${r.id}/send-email`,
+      )
+      if (data?.ok) {
+        notification.success({ message: '已发送', description: r.report_date })
+      } else {
+        notification.warning({ message: '发送失败', description: data?.error })
+      }
+      await refreshReports()
+    } catch (err) {
+      notification.error({ message: '发送失败', description: describeError(err) })
+    } finally {
+      setSendingId(null)
+    }
+  }
+
+  const setTagMeta: Record<string, { color: string; label: string }> = {
+    frontier: { color: 'blue', label: '当月前沿' },
+    top: { color: 'green', label: '近一年高分' },
+  }
+
+  const paperColumns: TableColumnsType<Paper> = [
+    { title: '标题', dataIndex: 'title', key: 'title', ellipsis: true, render: (v: string) => v ?? '—' },
+    {
+      title: '来源',
+      dataIndex: 'source',
+      key: 'source',
+      width: 150,
+      render: (v: string) => {
+        const s = v || ''
+        if (s === 'arxiv') return <Tag>arXiv</Tag>
+        if (s === 'semantic_scholar') return <Tag color="purple">Semantic Scholar</Tag>
+        if (s === 'openalex') return <Tag color="gold">OpenAlex</Tag>
+        const parts: string[] = []
+        if (s.includes('arxiv')) parts.push('arXiv')
+        if (s.includes('semantic_scholar')) parts.push('S2')
+        if (s.includes('openalex')) parts.push('OpenAlex')
+        return <Tag color="cyan">{parts.join(' + ') || '—'}</Tag>
+      },
+    },
+    { title: '引用', dataIndex: 'citation_count', key: 'citation_count', width: 80 },
+    {
+      title: '会议/期刊',
+      dataIndex: 'venue',
+      key: 'venue',
+      width: 160,
+      ellipsis: true,
+      render: (v: string) => v || '—',
+    },
+    {
+      title: '得分',
+      dataIndex: 'score',
+      key: 'score',
+      width: 110,
+      render: (v: number) =>
+        v == null ? (
+          '—'
+        ) : (
+          <Tag color={v >= 0.6 ? 'green' : v >= 0.4 ? 'orange' : 'default'}>{v.toFixed(2)}</Tag>
+        ),
+    },
+    {
+      title: '推荐集',
+      dataIndex: 'set_tag',
+      key: 'set_tag',
+      width: 110,
+      render: (v: string) => {
+        const m = setTagMeta[v]
+        return m ? <Tag color={m.color}>{m.label}</Tag> : '—'
+      },
+    },
+    { title: '发布', dataIndex: 'published_at', key: 'published_at', width: 110, render: (v: string) => v || '—' },
+  ]
+
+  const reportColumns: TableColumnsType<PaperReport> = [
+    { title: '日期', dataIndex: 'report_date', key: 'report_date', width: 120 },
+    {
+      title: '类型',
+      dataIndex: 'report_type',
+      key: 'report_type',
+      width: 110,
+      render: (v: string) =>
+        v === 'monthly' ? <Tag color="gold">月度总结</Tag> : <Tag color="blue">每日综述</Tag>,
+    },
+    {
+      title: '状态',
+      dataIndex: 'sent_to_email',
+      key: 'sent_to_email',
+      width: 100,
+      render: (v: number) => (v ? <Tag color="green">已发送</Tag> : <Tag>未发送</Tag>),
+    },
+    {
+      title: '操作',
+      key: 'action',
+      width: 200,
+      render: (_, r) => (
+        <Space>
+          <Button size="small" icon={<EyeOutlined />} onClick={() => void viewReport(r)}>
+            查看
+          </Button>
+          <Button
+            size="small"
+            icon={<MailOutlined />}
+            loading={sendingId === r.id}
+            onClick={() => void sendReportEmail(r)}
+          >
+            发送
+          </Button>
+        </Space>
+      ),
+    },
+  ]
+
+  const papersTab = (
+    <Space direction="vertical" style={{ width: '100%' }} size={16}>
+      <Card
+        title="论文推荐"
+        size="small"
+        extra={
+          <Button
+            type="primary"
+            icon={<DownloadOutlined />}
+            loading={running}
+            onClick={() => void runDaily()}
+          >
+            立即抓取
+          </Button>
+        }
+      >
+        <Space direction="vertical" style={{ width: '100%' }} size={8}>
+          <Space size={24} wrap>
+            <Typography.Text type="secondary">
+              论文库目录：<span className="mono">{paperStatus?.papers_dir ?? '—'}</span>
+            </Typography.Text>
+            <Typography.Text type="secondary">每日时间：{paperStatus?.daily_time ?? '—'}</Typography.Text>
+            <Typography.Text type="secondary">累计论文：{paperStatus?.paper_count ?? 0}</Typography.Text>
+            <Typography.Text type="secondary">报告：{paperStatus?.report_count ?? 0}</Typography.Text>
+          </Space>
+          <Typography.Text type="secondary">
+            每天 {paperStatus?.daily_time ?? '09:00'} 自动抓取 arXiv / Semantic Scholar 的当月前沿与近一年高分论文各
+            10 篇，生成中文综述并邮件发送；每月 1 日汇总上月科研热点与突破。
+          </Typography.Text>
+        </Space>
+      </Card>
+
+      <Card
+        title="论文库"
+        size="small"
+        extra={
+          <Button size="small" icon={<ReloadOutlined />} onClick={() => void refreshPapers()}>
+            刷新
+          </Button>
+        }
+      >
+        {papersLoading ? (
+          <Spin />
+        ) : papers.length === 0 ? (
+          <Empty description="暂无论文，点击「立即抓取」开始" />
+        ) : (
+          <Table<Paper>
+            rowKey="id"
+            columns={paperColumns}
+            dataSource={papers}
+            size="small"
+            pagination={{ pageSize: 10 }}
+          />
+        )}
+      </Card>
+
+      <Card
+        title="报告"
+        size="small"
+        extra={
+          <Button size="small" icon={<ReloadOutlined />} onClick={() => void refreshReports()}>
+            刷新
+          </Button>
+        }
+      >
+        {reports.length === 0 ? (
+          <Empty description="暂无报告" />
+        ) : (
+          <Table<PaperReport>
+            rowKey="id"
+            columns={reportColumns}
+            dataSource={reports}
+            size="small"
+            pagination={false}
+          />
+        )}
+        {viewingReport && (
+          <Card
+            size="small"
+            title={`${viewingReport.report_type === 'monthly' ? '月度总结' : '每日综述'} — ${
+              viewingReport.report_date
+            }`}
+            style={{ marginTop: 12 }}
+          >
+            <Markdown text={viewingReport.content ?? ''} />
+          </Card>
+        )}
+      </Card>
+    </Space>
+  )
 
   const docColumns: TableColumnsType<ResearchDoc> = [
     { title: '标题', dataIndex: 'title', key: 'title', ellipsis: true },
@@ -387,6 +678,7 @@ export default function ResearchPage(): JSX.Element {
         { key: 'docs', label: '文档', children: docsTab },
         { key: 'search', label: '检索', children: searchTab },
         { key: 'report', label: '报告', children: reportTab },
+        { key: 'papers', label: '论文', children: papersTab },
       ]}
     />
   )

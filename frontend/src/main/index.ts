@@ -29,7 +29,6 @@ let ballDocked = false
 let ballDockEdge: 'left' | 'right' | 'top' | 'bottom' | null = null
 let ballTween: ReturnType<typeof setInterval> | null = null
 
-const isDev = !app.isPackaged
 const rendererUrl = process.env['ELECTRON_RENDERER_URL']
 
 // ---------------------------------------------------------------------------

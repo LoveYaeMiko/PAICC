@@ -85,6 +85,33 @@ CREATE TABLE IF NOT EXISTS conversations (
     content    TEXT NOT NULL,
     created_at REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS papers (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    arxiv_id       TEXT UNIQUE,
+    title          TEXT NOT NULL,
+    authors        TEXT DEFAULT '',
+    abstract       TEXT DEFAULT '',
+    categories     TEXT DEFAULT '',
+    fields         TEXT DEFAULT '',
+    published_at   TEXT DEFAULT '',
+    url            TEXT DEFAULT '',
+    source         TEXT DEFAULT '',
+    citation_count INTEGER DEFAULT 0,
+    venue          TEXT DEFAULT '',
+    score          REAL DEFAULT 0,
+    set_tag        TEXT DEFAULT '',
+    crawl_date     TEXT DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS paper_reports (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_date   TEXT NOT NULL,
+    report_type   TEXT NOT NULL,
+    content       TEXT NOT NULL,
+    file_path     TEXT DEFAULT '',
+    sent_to_email INTEGER DEFAULT 0
+);
 """
 
 

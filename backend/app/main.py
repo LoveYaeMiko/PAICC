@@ -31,6 +31,7 @@ ROUTER_MODULES = [
     "storage",
     "quant",
     "research",
+    "papers",
     "ai",
     "claude_code",
 ]
@@ -40,6 +41,7 @@ BACKGROUND_SERVICES = [
     ("app.services.system_monitor", "start"),
     ("app.services.quant_manager", "start"),
     ("app.services.storage_analysis", "start_scheduler"),
+    ("app.services.paper_service", "start_scheduler"),
     ("app.services.claude_code", "start"),
     ("app.services.se_knowledge", "seed"),
 ]

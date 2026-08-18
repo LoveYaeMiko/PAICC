@@ -11,11 +11,9 @@ service is not yet available (e.g. during parallel development).
 from __future__ import annotations
 
 import logging
-import smtplib
 import threading
 import time
 from datetime import datetime
-from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +23,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app import db, ws
 from app.config import settings
+from app.services import mailer
 
 logger = logging.getLogger(__name__)
 
@@ -376,35 +375,12 @@ def send_email(report_id: int | None = None) -> dict[str, Any]:
     if row is None:
         return {"ok": False, "error": "No report available"}
 
-    port = settings.get_int("smtp_port", 465)
-    user = str(settings.get("smtp_user", ""))
-    password = str(settings.get("smtp_password", ""))
-    sender = str(settings.get("smtp_from", "") or user or "paicc@localhost")
-    recipient = str(settings.get("smtp_to", "")).strip()
-    if not recipient:
-        return {"ok": False, "error": "SMTP recipient (smtp_to) not configured"}
-
-    msg = EmailMessage()
-    msg["Subject"] = f"PAICC 存储分析报告 — {datetime.fromtimestamp(row['generated_at']).strftime('%Y-%m-%d')}"
-    msg["From"] = sender
-    msg["To"] = recipient
-    msg.set_content(row["content"])
-
-    try:
-        if port == 465:
-            server = smtplib.SMTP_SSL(host, port, timeout=30)
-        else:
-            server = smtplib.SMTP(host, port, timeout=30)
-            server.starttls()
-        with server:
-            if user:
-                server.login(user, password)
-            server.send_message(msg)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("send_email failed")
-        db.log_operation("storage_report_email_failed", {"report_id": row["id"]}, {"error": str(exc)})
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    subject = f"PAICC 存储分析报告 — {datetime.fromtimestamp(row['generated_at']).strftime('%Y-%m-%d')}"
+    result = mailer.send_mail(subject, row["content"])
+    if not result.get("ok"):
+        db.log_operation("storage_report_email_failed", {"report_id": row["id"]}, {"error": result.get("error")})
+        return result
 
     db.execute("UPDATE reports SET sent_to_email = 1 WHERE id = ?", (row["id"],))
-    db.log_operation("storage_report_emailed", {"report_id": row["id"]}, {"sent_to": recipient})
-    return {"ok": True, "sent_to": recipient}
+    db.log_operation("storage_report_emailed", {"report_id": row["id"]}, {"sent_to": result.get("sent_to")})
+    return result

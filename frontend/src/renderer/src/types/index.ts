@@ -179,6 +179,43 @@ export interface ResearchDoc {
   chunk_count: number
 }
 
+export interface Paper {
+  id: number
+  arxiv_id: string | null
+  title: string
+  authors: string
+  abstract: string
+  categories: string
+  fields: string
+  published_at: string
+  url: string
+  source: string
+  citation_count: number
+  venue: string
+  score: number
+  set_tag: string
+  crawl_date: string
+}
+
+export interface PaperReport {
+  id: number
+  report_date: string
+  report_type: 'daily' | 'monthly'
+  content?: string
+  file_path: string
+  sent_to_email: number
+}
+
+export interface PaperStatus {
+  papers_dir: string
+  daily_time: string
+  monthly_time: string
+  arxiv_categories: string
+  paper_count: number
+  report_count: number
+  last_report: { report_date: string; report_type: string; sent_to_email: number } | null
+}
+
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool'
   content: string

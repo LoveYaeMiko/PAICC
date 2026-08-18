@@ -54,6 +54,13 @@ DEFAULTS: dict[str, Any] = {
     "smtp_to": "",
     # Storage report schedule
     "report_schedule": "weekly",
+    # Paper recommendation / literature review
+    "papers_dir": str(Path.home() / "Desktop" / "papers"),
+    "paper_daily_time": "09:00",
+    "paper_monthly_time": "09:30",
+    "arxiv_categories": "cs.AI,cs.LG,cs.CL,cs.CV,cs.NE,cs.RO,stat.ML",
+    "papers_proxy": "",
+    "paper_s2_api_key": "",
     # Misc
     "backend_port": "8000",
     "everything_path": "es.exe",
@@ -140,6 +147,9 @@ class Settings:
 
     def get_quant_root(self) -> str:
         return str(self.get("quant_root", ""))
+
+    def get_papers_dir(self) -> str:
+        return str(self.get("papers_dir", ""))
 
 
 settings = Settings()
