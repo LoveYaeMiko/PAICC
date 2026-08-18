@@ -462,20 +462,20 @@ function registerIpc(): void {
     mainWindow?.show()
     if (typeof route === 'string') mainWindow?.webContents.send('paicc:navigate', route)
   })
-  ipcMain.handle('paicc:get-auto-launch', () => app.getLoginItemSettings().openAtLogin)
+  // In dev the login item is the bare Electron binary, which carries no app path:
+  // on boot Windows would launch Electron's default "run a local app" screen. So we
+  // point it at the project root — package.json's "main" resolves to out/main/index.js
+  // and out/renderer/index.html serves the UI (no dev server needed). Packaged builds
+  // need no such fix.
+  const devLoginItemOpts = (): { path?: string; args?: string[] } =>
+    app.isPackaged ? {} : { path: process.execPath, args: [app.getAppPath()] }
+
+  ipcMain.handle('paicc:get-auto-launch', () =>
+    app.getLoginItemSettings(devLoginItemOpts()).openAtLogin,
+  )
   ipcMain.handle('paicc:set-auto-launch', (_e, openAtLogin: boolean) => {
-    const settings: Electron.Settings = { openAtLogin: Boolean(openAtLogin) }
-    // In dev the login item is the bare Electron binary, which carries no app path:
-    // on boot Windows would launch Electron's default "run a local app" screen.
-    // Point it at the project root so it relaunches the real app — package.json's
-    // "main" resolves to out/main/index.js, and out/renderer/index.html serves the UI
-    // (no dev server needed). Packaged builds need no such fix.
-    if (!app.isPackaged && settings.openAtLogin) {
-      settings.path = process.execPath
-      settings.args = [app.getAppPath()]
-    }
-    app.setLoginItemSettings(settings)
-    return app.getLoginItemSettings().openAtLogin
+    app.setLoginItemSettings({ openAtLogin: Boolean(openAtLogin), ...devLoginItemOpts() })
+    return app.getLoginItemSettings(devLoginItemOpts()).openAtLogin
   })
 }
 
