@@ -14,6 +14,7 @@ trading days.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 from pathlib import Path
@@ -25,6 +26,7 @@ from apscheduler.triggers.cron import CronTrigger
 from app import db, ws
 from app.config import settings
 from app.services import mailer, quant_manager
+from app.services.llm_client import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +110,54 @@ def _calibration_summary_text(cal: dict[str, Any]) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# financial-expert commentary
+# --------------------------------------------------------------------------- #
+_FINANCIAL_SYSTEM = (
+    "你是一位资深的 A 股量化交易与风险管理专家，擅长解读影子盘（模拟盘）的净值曲线、"
+    "回撤、红线状态与持仓成本，并给出克制、可执行的改进建议。"
+)
+
+
+def _build_commentary_prompt(report: str) -> str:
+    return (
+        "以下是今日 FQA 影子模式量化交易的日报。请以资深 A 股量化交易与风控专家的身份，"
+        "对这份报告进行专业点评，并给出可执行的改进建议。\n\n"
+        "要求：\n"
+        "1. 用中文输出，Markdown 格式，标题以「# 金融专家点评」开头；\n"
+        "2. 点评今日组合表现、红线状态与潜在风险；\n"
+        "3. 给出 3~5 条具体、可执行的改进建议；\n"
+        "4. 语气专业、克制，不做任何收益承诺或投资建议的绝对保证。\n\n"
+        "日报内容如下：\n\n" + report
+    )
+
+
+async def _commentary_chat(prompt: str) -> str:
+    model = str(settings.get("quant_commentary_model") or "").strip()
+    api_key = str(settings.get("quant_commentary_api_key") or "").strip()
+    result = await LLMClient().chat(
+        [{"role": "system", "content": _FINANCIAL_SYSTEM}, {"role": "user", "content": prompt}],
+        model=model or None,
+        api_key=api_key or None,
+        temperature=0.4,
+    )
+    return str(result.get("content") or "").strip()
+
+
+def _generate_shadow_commentary(report: str) -> str:
+    """Ask the LLM (as a financial expert) to comment on the daily report.
+
+    Returns empty string on any failure so the email still goes out without the
+    commentary section.
+    """
+    try:
+        content = asyncio.run(_commentary_chat(_build_commentary_prompt(report)))
+        return content if content else ""
+    except Exception:  # noqa: BLE001
+        logger.exception("LLM shadow commentary failed; emailing without commentary")
+        return ""
+
+
+# --------------------------------------------------------------------------- #
 # jobs
 # --------------------------------------------------------------------------- #
 def run_shadow_daily() -> dict[str, Any]:
@@ -123,6 +173,10 @@ def run_shadow_daily() -> dict[str, Any]:
         if settings.get_bool("quant_shadow_auto_email", True) and status is not None:
             if not report:
                 report = _shadow_summary_text(status)
+            if settings.get_bool("quant_commentary_enabled", True):
+                commentary = _generate_shadow_commentary(report)
+                if commentary:
+                    report = report.rstrip() + "\n\n---\n\n" + commentary
             subject = f"FQA 影子模式日报 — {status.get('last_trading_date') or status.get('as_of')}"
             email = mailer.send_mail(subject, report)
 

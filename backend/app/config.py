@@ -44,6 +44,12 @@ DEFAULTS: dict[str, Any] = {
     "llm_base_url": "https://api.deepseek.com",
     "llm_api_key": "",
     "llm_temperature": "0.7",
+    # Financial-expert commentary appended to the daily shadow report email.
+    # Uses a dedicated model/API key so it can run a higher-tier model without
+    # disturbing the main LLM settings.
+    "quant_commentary_enabled": "true",
+    "quant_commentary_model": "deepseek-v4-pro",
+    "quant_commentary_api_key": "",
     # Knowledge / research
     "knowledge_threshold": "0.5",
     "search_api_provider": "",

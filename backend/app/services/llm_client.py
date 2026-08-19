@@ -94,27 +94,35 @@ class LLMClient:
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        *,
+        model: str | None = None,
+        api_key: str | None = None,
+        temperature: Any = None,
     ) -> dict[str, Any]:
         """Send a chat request and return ``{content, tool_calls}``.
 
         ``messages`` uses the OpenAI shape (``role`` in
         ``system/user/assistant/tool``); it is translated for the Anthropic
         provider automatically.
+
+        ``model``/``api_key``/``temperature`` override the configured values on
+        a per-call basis (e.g. to run a dedicated, higher-tier model for a single
+        feature without disturbing the main LLM settings).
         """
         cfg = settings.get_llm_config()
         provider = str(cfg.get("provider") or "deepseek").strip().lower()
-        model = str(cfg.get("model") or "")
+        eff_model = model or str(cfg.get("model") or "")
         base_url = str(cfg.get("base_url") or "")
-        api_key = str(cfg.get("api_key") or "")
-        temperature = cfg.get("temperature")
+        eff_api_key = api_key or str(cfg.get("api_key") or "")
+        eff_temperature = cfg.get("temperature") if temperature is None else temperature
 
-        if provider != "ollama" and not api_key:
+        if provider != "ollama" and not eff_api_key:
             raise RuntimeError("LLM API key not configured. Set it in Settings.")
 
         if provider == "claude":
-            return await self._chat_claude(model, base_url, api_key, temperature, messages, tools or [])
+            return await self._chat_claude(eff_model, base_url, eff_api_key, eff_temperature, messages, tools or [])
         if provider in OPENAI_COMPATIBLE_PROVIDERS:
-            return await self._chat_openai(provider, model, base_url, api_key, temperature, messages, tools or [])
+            return await self._chat_openai(provider, eff_model, base_url, eff_api_key, eff_temperature, messages, tools or [])
         raise RuntimeError(f"Unsupported LLM provider: {provider}")
 
     # -- OpenAI-compatible -------------------------------------------------
