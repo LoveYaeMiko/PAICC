@@ -79,6 +79,15 @@ const LEVEL_LABEL: Record<RedLineLevel, string> = {
   unknown: '未知',
 }
 
+// ECharts heatmap visualMap.pieces only matches numeric values (string values
+// silently fail and render the cells blank), so red-line levels are mapped to a
+// stable index before being fed to the heatmap series.
+const LEVEL_ORDER: RedLineLevel[] = ['ok', 'warning', 'critical', 'unknown']
+function levelIndex(lv: string): number {
+  const i = LEVEL_ORDER.indexOf(lv as RedLineLevel)
+  return i >= 0 ? i : LEVEL_ORDER.indexOf('unknown')
+}
+
 function describeError(err: unknown): string {
   if (err && typeof err === 'object' && 'response' in err) {
     const resp = (err as { response?: { data?: unknown } }).response
@@ -310,17 +319,17 @@ function buildRedLineHistoryOption(history: RedLineHistoryPoint[]): EChartsOptio
   const names = Array.from(new Set(history.map((h) => h.name)))
   const labels = names.map((n) => history.find((h) => h.name === n)?.label || n)
   const data = times.flatMap((t, ti) =>
-    (byTs.get(t) ?? []).map((p) => [ti, names.indexOf(p.name), p.level]),
+    (byTs.get(t) ?? []).map((p) => [ti, names.indexOf(p.name), levelIndex(p.level)]),
   )
   return {
     tooltip: {
       formatter: (p: unknown) => {
-        const v = (p as { value: [number, number, string] }).value
+        const v = (p as { value: [number, number, number] }).value
         const name = names[v[1]]
         const label = labels[v[1]]
         const pt = (byTs.get(times[v[0]]) ?? []).find((h) => h.name === name)
-        const level = v[2]
-        const lv = LEVEL_LABEL[level as RedLineLevel] ?? level
+        const level = LEVEL_ORDER[v[2]] ?? 'unknown'
+        const lv = LEVEL_LABEL[level] ?? level
         return `${label} · ${formatTime(times[v[0]])}<br/>状态：${lv}${pt && pt.value != null ? `（值 ${fmtRedValue(pt.value)}）` : ''}`
       },
     },
@@ -330,12 +339,7 @@ function buildRedLineHistoryOption(history: RedLineHistoryPoint[]): EChartsOptio
     visualMap: {
       show: false,
       dimension: 2,
-      pieces: [
-        { value: 'ok', color: '#52c41a' },
-        { value: 'warning', color: '#faad14' },
-        { value: 'critical', color: '#ff4d4f' },
-        { value: 'unknown', color: '#8a93a6' },
-      ],
+      pieces: LEVEL_ORDER.map((lvl, i) => ({ value: i, color: LEVEL_COLOR[lvl] })),
     },
     series: [{ type: 'heatmap', data }],
   } as EChartsOption
