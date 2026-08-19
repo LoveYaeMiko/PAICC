@@ -1111,6 +1111,12 @@ export default function QuantPage(): JSX.Element {
               <Descriptions.Item label="最低佣金">{shadow.s7_params?.min_commission ?? '—'}</Descriptions.Item>
               <Descriptions.Item label="印花税 bps">{shadow.s7_params?.stamp_tax_sell_bps ?? '—'}</Descriptions.Item>
               <Descriptions.Item label="过户费 bps">{shadow.s7_params?.transfer_fee_bps ?? '—'}</Descriptions.Item>
+              <Descriptions.Item label="Beta 中性化">
+                {shadow.strategy?.beta_neutralize ? `开（${shadow.strategy.beta_lookback ?? '—'}d）` : '关'}
+              </Descriptions.Item>
+              <Descriptions.Item label="调仓周期">
+                {shadow.strategy?.rebalance_days != null ? `${shadow.strategy.rebalance_days} 天` : '—'}
+              </Descriptions.Item>
             </Descriptions>
             <Typography.Text strong>当日 TopN 目标持仓</Typography.Text>
             <Table<ShadowPosition>

@@ -825,15 +825,42 @@ def run_project_command(command: str, timeout: int = 1800) -> dict[str, Any]:
 
 
 def read_shadow_status() -> dict[str, Any] | None:
-    """Parse the FQA ``outputs/shadow_status.json`` (emitted by ``cli.py shadow``)."""
+    """Parse the FQA ``outputs/shadow_status.json`` (emitted by ``cli.py shadow``).
+
+    The strategy-level config that drives the run (beta neutralization, rebalance
+    cadence) is appended as a ``strategy`` field so the panel reflects the live
+    factor setup, not just the numeric outputs.
+    """
     root = Path(_project_root())
     for rel in ("outputs/shadow_status.json", "shadow_status.json"):
         path = root / rel
         if path.is_file():
             data = _parse_json_file(path)
             if isinstance(data, dict):
+                data.setdefault("strategy", _read_strategy_config(root))
                 return data
     return None
+
+
+def _read_strategy_config(root: Path) -> dict[str, Any]:
+    """Read the alpha/paper strategy keys the FQA beta-neutralization change added.
+
+    ``beta_neutralize`` / ``beta_lookback`` live under ``alpha_core``;
+    ``rebalance_days`` under ``paper``. All are optional — a missing key just
+    yields ``None`` / ``False`` so older configs keep working.
+    """
+    data = _load_yaml(root / "configs" / "master_config.yaml")
+    if not isinstance(data, dict):
+        data = {}
+    alpha = data.get("alpha_core")
+    paper = data.get("paper")
+    alpha = alpha if isinstance(alpha, dict) else {}
+    paper = paper if isinstance(paper, dict) else {}
+    return {
+        "beta_neutralize": bool(alpha.get("beta_neutralize", False)),
+        "beta_lookback": alpha.get("beta_lookback"),
+        "rebalance_days": paper.get("rebalance_days"),
+    }
 
 
 def read_s7_calibration() -> dict[str, Any] | None:

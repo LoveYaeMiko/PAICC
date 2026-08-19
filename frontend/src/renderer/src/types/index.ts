@@ -236,6 +236,12 @@ export interface ExcessPoint {
   excess: number
 }
 
+export interface ShadowStrategy {
+  beta_neutralize: boolean
+  beta_lookback: number | null
+  rebalance_days: number | null
+}
+
 export interface ShadowStatus {
   as_of: string
   last_run: string
@@ -246,6 +252,7 @@ export interface ShadowStatus {
   s7_params: S7Params
   refreshed: Record<string, unknown>
   red_lines: ShadowRedLine[]
+  strategy?: ShadowStrategy
   equity_curve?: EquityPoint[]
   benchmark?: BenchmarkPoint[]
   excess_curve?: ExcessPoint[]
