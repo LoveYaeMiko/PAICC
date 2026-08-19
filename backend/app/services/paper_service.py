@@ -226,6 +226,18 @@ def _paper_markdown(p: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _seen_paper_keys() -> set[str]:
+    """Keys (arXiv id or lower-cased title) of every paper already recommended.
+
+    The recommendation pool is filtered against this so a paper is never
+    re-recommended on a later day — the "never repeat" guarantee.
+    """
+    keys: set[str] = set()
+    for r in db.query("SELECT arxiv_id, title FROM papers"):
+        keys.add(r["arxiv_id"] or (r["title"] or "").strip().lower())
+    return keys
+
+
 def _persist_papers(papers: list[dict[str, Any]], crawl_date: str) -> None:
     for p in papers:
         if p.get("arxiv_id"):
@@ -313,6 +325,8 @@ def run_daily() -> dict[str, Any]:
         task_manager.update_task(progress=0.6)
 
         pool = paper_crawler.merge_dedupe(arxiv_papers, s2_papers, openalex_papers)
+        # Never re-recommend a paper already shown on a previous day.
+        pool = paper_crawler.filter_seen(pool, _seen_paper_keys())
         recs = paper_crawler.select_recommendations(pool)
 
         frontier = recs["frontier"]
@@ -330,7 +344,13 @@ def run_daily() -> dict[str, Any]:
         if all_papers:
             _persist_papers(all_papers, date_str)
 
-        report = _generate_daily_report(frontier, top)
+        if all_papers:
+            report = _generate_daily_report(frontier, top)
+        else:
+            report = (
+                f"# 每日 AI 论文综述\n\n- 日期：{date_str}\n\n"
+                "今日无新论文：已推荐的论文不再重复推荐，等待 arXiv 有新论文提交后自动恢复。\n"
+            )
         day_dir = _write_daily_files(all_papers, report, date_str)
         report_id = db.execute(
             "INSERT INTO paper_reports(report_date, report_type, content, file_path, sent_to_email) "

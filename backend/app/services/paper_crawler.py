@@ -146,11 +146,21 @@ def fetch_arxiv(categories: str | None = None, since_days: int = 365) -> list[di
     }
     url = f"{ARXIV_API}?{urlencode(params)}"
 
-    try:
-        resp = httpx.get(url, proxy=_proxy(), timeout=_TIMEOUT, follow_redirects=True)
-        resp.raise_for_status()
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("arXiv fetch failed")
+    resp = None
+    for attempt in range(3):
+        try:
+            resp = httpx.get(url, proxy=_proxy(), timeout=_TIMEOUT, follow_redirects=True)
+            if resp.status_code == 429:
+                wait = 5 * (attempt + 1)
+                logger.warning("arXiv 429 (retry in %ds)", wait)
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            break
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("arXiv fetch failed")
+            time.sleep(1)
+    if resp is None or resp.status_code >= 400:
         return []
 
     papers: list[dict[str, Any]] = []
@@ -442,6 +452,22 @@ def frontier_score(p: dict[str, Any]) -> float:
 # ---------------------------------------------------------------------------
 # Merge + select
 # ---------------------------------------------------------------------------
+def paper_key(p: dict[str, Any]) -> str:
+    """Stable identity for a paper: arXiv id when present, else lower-cased title.
+
+    This is the same key ``merge_dedupe`` collapses on, so ``filter_seen`` can
+    reliably drop papers that were already recommended on a previous day.
+    """
+    return p.get("arxiv_id") or (p.get("title") or "").strip().lower()
+
+
+def filter_seen(pool: list[dict[str, Any]], seen: set[str]) -> list[dict[str, Any]]:
+    """Drop papers already recommended before (never repeat a recommendation)."""
+    if not seen:
+        return pool
+    return [p for p in pool if paper_key(p) not in seen]
+
+
 def merge_dedupe(*source_lists: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Merge paper lists from multiple sources, enriching earlier records with the
     richer citation/venue metadata of later ones (matched by arXiv id or title)."""
