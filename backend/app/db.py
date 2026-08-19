@@ -64,6 +64,17 @@ CREATE TABLE IF NOT EXISTS quant_commands (
     description TEXT DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS quant_redline_history (
+    id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts     REAL NOT NULL,
+    source TEXT DEFAULT '',
+    name   TEXT NOT NULL,
+    label  TEXT DEFAULT '',
+    level  TEXT NOT NULL,
+    value  TEXT,
+    detail TEXT DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS research_documents (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     title        TEXT NOT NULL,

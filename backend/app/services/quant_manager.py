@@ -19,6 +19,7 @@ import os
 import subprocess
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,7 @@ _start_lock = threading.Lock()
 _observer: Any = None
 _last_overall: str | None = None
 _last_criticals: set[str] = set()
+_last_history_signature: tuple | None = None
 
 #: PIDs spawned by :func:`run_command`, keyed by pid -> {pid, project_id, command, root}.
 _tracked_lock = threading.Lock()
@@ -151,15 +153,21 @@ def detect_project(root_path: str) -> dict[str, Any]:
             dashboard_script = ep
             break
     if dashboard_script is None:
-        for candidate in ("scripts/phase10_dashboard.py", "phase10_dashboard.py", "src/phase10_dashboard.py"):
+        for candidate in (
+            "scripts/phase10_dashboard.py", "phase10_dashboard.py", "src/phase10_dashboard.py",
+            "src/paper/shadow.py", "src/calibration.py",
+        ):
             if (root / candidate).is_file():
                 dashboard_script = candidate
                 break
 
     has_simulation_dashboard = bool(
         (root / "outputs" / "phase10_dashboard.json").is_file()
+        or (root / "outputs" / "shadow_status.json").is_file()
+        or (root / "outputs" / "s7_calibration.json").is_file()
         or (root / "data" / "red_lines.json").is_file()
         or (root / "scripts" / "phase10_dashboard.py").is_file()
+        or (root / "src" / "paper" / "shadow.py").is_file()
         or any("dashboard" in f.lower() for f in config_files)
     )
 
@@ -283,6 +291,32 @@ def _parse_json_file(path: Path) -> Any | None:
     return _parse_json(text)
 
 
+def _payload_timestamp(payload: Any) -> float | None:
+    """Best-effort epoch seconds from the source data's own ``last_run``/``as_of``.
+
+    FQA emits shadow status at most once a day; a ``time.time()`` timestamp would
+    misleadingly show "just now" for day-old data. Prefer the run's own time.
+    """
+    if not isinstance(payload, dict):
+        return None
+    for key in ("last_run", "timestamp"):
+        val = payload.get(key)
+        if isinstance(val, (int, float)) and key == "timestamp":
+            return float(val)
+        if isinstance(val, str):
+            try:
+                return datetime.fromisoformat(val).timestamp()
+            except ValueError:
+                continue
+    as_of = payload.get("as_of")
+    if isinstance(as_of, str):
+        try:
+            return datetime.fromisoformat(as_of).timestamp()
+        except ValueError:
+            pass
+    return None
+
+
 def _build_status(data: Any, source: str, timestamp: float) -> dict[str, Any] | None:
     if isinstance(data, list):
         payload: Any = {"red_lines": data}
@@ -292,12 +326,18 @@ def _build_status(data: Any, source: str, timestamp: float) -> dict[str, Any] | 
         return None
 
     red_lines = [_extract_line(payload, spec) for spec in _RED_LINE_SPECS]
-    return {
-        "timestamp": timestamp,
+    result: dict[str, Any] = {
+        "timestamp": _payload_timestamp(payload) or timestamp,
         "overall": _overall([rl["level"] for rl in red_lines]),
         "red_lines": red_lines,
         "source": source,
     }
+    # Surface the underlying data's own freshness metadata alongside the lines.
+    if isinstance(payload, dict):
+        for key in ("last_run", "as_of", "data_freshness_days"):
+            if payload.get(key) is not None:
+                result[key] = payload[key]
+    return result
 
 
 def _extract_line(payload: Any, spec: dict[str, Any]) -> dict[str, Any]:
@@ -907,6 +947,90 @@ def _project_root_and_log_dir() -> tuple[str, str]:
 
 
 # --------------------------------------------------------------------------- #
+# Red-line history (persisted snapshots for drift / trend charts)
+# --------------------------------------------------------------------------- #
+def _latest_db_signature() -> tuple[tuple[str, str, str], ...] | None:
+    """Reconstruct the signature of the most recent snapshot already in the DB.
+
+    All rows of one snapshot share a ``ts``; this lets a freshly-started process
+    skip re-writing a snapshot that was persisted before the restart.
+    """
+    rows = db.query(
+        "SELECT name, level, value FROM quant_redline_history "
+        "WHERE ts = (SELECT MAX(ts) FROM quant_redline_history) ORDER BY id"
+    )
+    if not rows:
+        return None
+    return tuple(
+        sorted((str(r["name"]), str(r["level"]), str(r["value"])) for r in rows)
+    )
+
+
+def _append_redline_history(status: dict[str, Any]) -> None:
+    """Persist a snapshot of the red lines when their values change.
+
+    The shadow data refreshes at most once a day, so keying on the value
+    signature (rather than the 10s poll tick) yields exactly the daily drift
+    history the panel needs — without spamming a row every poll. On the first
+    poll of a process we seed the in-memory signature from the DB so a restart
+    does not re-write the latest snapshot.
+    """
+    global _last_history_signature
+    red_lines = status.get("red_lines", [])
+    if not red_lines:
+        return
+    signature = tuple(
+        sorted((str(rl.get("name")), str(rl.get("level")), str(rl.get("value")))
+               for rl in red_lines)
+    )
+    if _last_history_signature is None:
+        _last_history_signature = _latest_db_signature()
+    if signature == _last_history_signature:
+        return
+    _last_history_signature = signature
+    ts = float(status.get("timestamp") or time.time())
+    source = str(status.get("source", ""))
+    for rl in red_lines:
+        value = rl.get("value")
+        db.execute(
+            "INSERT INTO quant_redline_history(ts, source, name, label, level, value, detail) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                ts,
+                source,
+                str(rl.get("name", "")),
+                str(rl.get("label", "")),
+                str(rl.get("level", "")),
+                None if value is None else str(value),
+                str(rl.get("detail", "")),
+            ),
+        )
+
+
+def redline_history(limit: int = 200) -> list[dict[str, Any]]:
+    """Return the latest ``limit`` persisted red-line snapshots, oldest first.
+
+    A subquery first grabs the newest ``limit`` rows (by ts desc), then the outer
+    sort flips them back to ascending for trend charts. (A naive
+    ``ORDER BY ts ASC ... LIMIT ?`` would return the *oldest* rows instead.)
+    """
+    rows = db.query(
+        "SELECT * FROM ("
+        "  SELECT * FROM quant_redline_history ORDER BY ts DESC, id DESC LIMIT ?"
+        ") ORDER BY ts ASC, id ASC",
+        (limit,),
+    )
+    for r in rows:
+        v = r.get("value")
+        if v is not None:
+            try:
+                r["value"] = float(v)
+            except (TypeError, ValueError):
+                pass  # keep the raw string (e.g. boolean "True"/"False")
+    return rows
+
+
+# --------------------------------------------------------------------------- #
 # Background service
 # --------------------------------------------------------------------------- #
 def start() -> None:
@@ -1047,6 +1171,8 @@ def _status_poll_loop() -> None:
                         "names": [name],
                     },
                 )
+
+            _append_redline_history(status)
 
             _last_overall = overall
             _last_criticals = criticals

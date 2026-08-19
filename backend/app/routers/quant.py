@@ -174,6 +174,12 @@ def schedule_status() -> dict[str, Any]:
     return quant_scheduler.get_status()
 
 
+@router.get("/redline-history")
+def redline_history(limit: int = 200) -> list[dict[str, Any]]:
+    """Persisted red-line snapshots (value/level over time) for trend charts."""
+    return quant_manager.redline_history(limit)
+
+
 @router.post("/shadow/run")
 def run_shadow(payload: RunShadowRequest) -> dict[str, Any]:
     """Trigger the shadow-mode daily run in the background (confirmed)."""

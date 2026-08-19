@@ -151,7 +151,7 @@ export interface RedLine {
   name: string
   label?: string
   level: RedLineLevel
-  value: number | null
+  value: number | boolean | null
   threshold: number | null
   detail: string
 }
@@ -161,6 +161,9 @@ export interface RedLineStatus {
   overall: RedLineLevel
   red_lines: RedLine[]
   source: string
+  last_run?: string
+  as_of?: string
+  data_freshness_days?: number
 }
 
 export interface QuantProcessInfo {
@@ -188,14 +191,23 @@ export interface ShadowPosition {
   shares: number
   weight: number
   side: string
+  entry_price?: number | null
+  last_price?: number | null
+  pnl?: number | null
+  pnl_pct?: number | null
+  days_held?: number | null
 }
 
 export interface S7Params {
   amplitude: number
   zscore_threshold: number
+  position_cut: number
   freeze_days: number
   slippage_bps: number
   commission_bps: number
+  min_commission: number
+  stamp_tax_sell_bps: number
+  transfer_fee_bps: number
 }
 
 export interface ShadowRedLine {
@@ -205,6 +217,23 @@ export interface ShadowRedLine {
   threshold?: number
   critical?: number
   detail?: string
+}
+
+export interface EquityPoint {
+  date: string
+  equity: number
+  drawdown: number
+}
+
+export interface BenchmarkPoint {
+  date: string
+  equity: number
+  drawdown: number
+}
+
+export interface ExcessPoint {
+  date: string
+  excess: number
 }
 
 export interface ShadowStatus {
@@ -217,6 +246,55 @@ export interface ShadowStatus {
   s7_params: S7Params
   refreshed: Record<string, unknown>
   red_lines: ShadowRedLine[]
+  equity_curve?: EquityPoint[]
+  benchmark?: BenchmarkPoint[]
+  excess_curve?: ExcessPoint[]
+}
+
+export interface RedLineHistoryPoint {
+  id: number
+  ts: number
+  source: string
+  name: string
+  label: string
+  level: string
+  value: number | string | null
+  detail: string
+}
+
+export interface S7AmplitudeResult {
+  amplitude: number
+  sharpe: number
+  max_drawdown: number
+  total_return: number
+  annualized_return: number
+}
+
+export interface S7SentimentResult {
+  zscore_threshold: number
+  freeze_days: number
+  sharpe: number
+  max_drawdown: number
+  total_return: number
+}
+
+export interface S7Amplitude {
+  current: number
+  grid: number[]
+  results: S7AmplitudeResult[]
+  best: S7AmplitudeResult | null
+  recommended: number
+  note?: string
+}
+
+export interface S7Sentiment {
+  current: { zscore_threshold: number; freeze_days: number }
+  zscore_grid: number[]
+  freeze_grid: number[]
+  results: S7SentimentResult[]
+  best: S7SentimentResult | null
+  recommended: { zscore_threshold: number; freeze_days: number }
+  note?: string
 }
 
 export interface S7Calibration {
@@ -224,8 +302,8 @@ export interface S7Calibration {
   last_run: string
   window: { start: string; end: string }
   cost: Record<string, unknown>
-  amplitude: Record<string, unknown>
-  sentiment: Record<string, unknown>
+  amplitude: S7Amplitude
+  sentiment: S7Sentiment
   recommendations: Record<string, unknown>
   auto_apply: boolean
   applied: { changed: Record<string, { old: string; new: string }>; unchanged: string[] }

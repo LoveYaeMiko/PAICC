@@ -29,6 +29,9 @@ import {
 } from 'antd'
 import type { TableColumnsType } from 'antd'
 import { useCallback, useEffect, useRef, useState } from 'react'
+import dayjs from 'dayjs'
+import type { EChartsOption } from 'echarts'
+import EChart from '@/components/EChart'
 import { api } from '@/services/api'
 import { confirmOperation } from '@/services/confirm'
 import { useWsEvent } from '@/services/ws'
@@ -38,6 +41,7 @@ import type {
   QuantProject,
   QuantScheduleStatus,
   RedLine,
+  RedLineHistoryPoint,
   RedLineLevel,
   RedLineStatus,
   S7Calibration,
@@ -112,6 +116,20 @@ function formatTime(ts: number | null | undefined): string {
   return new Date(ms).toLocaleString()
 }
 
+function formatIso(v: string | null | undefined): string {
+  if (!v) return '—'
+  const d = dayjs(v)
+  return d.isValid() ? d.format('YYYY-MM-DD HH:mm') : v
+}
+
+function fmtRedValue(v: number | string | null | undefined): string {
+  if (v == null) return ''
+  const s = String(v)
+  if (s === 'True' || s === 'true' || s === '1') return '异常'
+  if (s === 'False' || s === 'false' || s === '0') return '正常'
+  return s
+}
+
 function formatRatio(v: number | null | undefined): string {
   if (v == null) return '—'
   return `${(v * 100).toFixed(2)}%`
@@ -124,6 +142,203 @@ function formatMoney(v: number | null | undefined): string {
 
 function isErrorLine(line: string): boolean {
   return /(error|trace|错误)/i.test(line)
+}
+
+// --------------------------------------------------------------------------- #
+// ECharts option builders
+// --------------------------------------------------------------------------- #
+function buildEquityOption(shadow: ShadowStatus): EChartsOption {
+  const eq = shadow.equity_curve ?? []
+  const bench = shadow.benchmark ?? []
+  const series: unknown[] = [
+    {
+      name: '组合净值',
+      type: 'line',
+      showSymbol: false,
+      smooth: true,
+      data: eq.map((p) => [p.date, p.equity]),
+      lineStyle: { width: 2 },
+    },
+  ]
+  if (bench.length) {
+    series.push({
+      name: 'HS300 基准',
+      type: 'line',
+      showSymbol: false,
+      smooth: true,
+      data: bench.map((p) => [p.date, p.equity]),
+      lineStyle: { width: 1.5, type: 'dashed' },
+    })
+  }
+  return {
+    tooltip: { trigger: 'axis' },
+    legend: { bottom: 0 },
+    grid: { left: 64, right: 20, top: 20, bottom: 44 },
+    xAxis: { type: 'time' },
+    yAxis: { type: 'value', scale: true, name: '净值' },
+    series,
+  } as EChartsOption
+}
+
+function buildDrawdownExcessOption(shadow: ShadowStatus): EChartsOption {
+  const eq = shadow.equity_curve ?? []
+  const bench = shadow.benchmark ?? []
+  const excess = shadow.excess_curve ?? []
+  const series: unknown[] = []
+  if (eq.length) {
+    series.push({
+      name: '组合回撤',
+      type: 'line',
+      showSymbol: false,
+      data: eq.map((p) => [p.date, +(p.drawdown * 100).toFixed(2)]),
+      areaStyle: { opacity: 0.15 },
+      yAxisIndex: 0,
+    })
+  }
+  if (bench.length) {
+    series.push({
+      name: '基准回撤',
+      type: 'line',
+      showSymbol: false,
+      data: bench.map((p) => [p.date, +(p.drawdown * 100).toFixed(2)]),
+      lineStyle: { type: 'dashed' },
+      yAxisIndex: 0,
+    })
+  }
+  if (excess.length) {
+    series.push({
+      name: '超额收益',
+      type: 'line',
+      showSymbol: false,
+      data: excess.map((p) => [p.date, +(p.excess * 100).toFixed(2)]),
+      yAxisIndex: 1,
+    })
+  }
+  return {
+    tooltip: { trigger: 'axis', valueFormatter: (v: unknown) => `${v}%` },
+    legend: { bottom: 0 },
+    grid: { left: 52, right: 52, top: 20, bottom: 44 },
+    xAxis: { type: 'time' },
+    yAxis: [
+      { type: 'value', name: '回撤%', axisLabel: { formatter: '{value}%' } },
+      { type: 'value', name: '超额%', axisLabel: { formatter: '{value}%' }, splitLine: { show: false } },
+    ],
+    series,
+  } as EChartsOption
+}
+
+function buildAmplitudeOption(cal: S7Calibration): EChartsOption {
+  const results = cal.amplitude?.results ?? []
+  if (!results.length) return {} as EChartsOption
+  const sorted = [...results].sort((a, b) => a.amplitude - b.amplitude)
+  const best = sorted.find((r) => r.amplitude === cal.amplitude.recommended) ?? null
+  return {
+    tooltip: { trigger: 'axis' },
+    legend: { bottom: 0 },
+    grid: { left: 52, right: 52, top: 20, bottom: 44 },
+    xAxis: { type: 'category', data: sorted.map((r) => String(r.amplitude)), name: '幅度' },
+    yAxis: [
+      { type: 'value', name: 'Sharpe', scale: true },
+      { type: 'value', name: '回撤%', axisLabel: { formatter: '{value}%' }, splitLine: { show: false } },
+    ],
+    series: [
+      {
+        name: 'Sharpe',
+        type: 'line',
+        data: sorted.map((r) => r.sharpe),
+        markPoint: best
+          ? { data: [{ coord: [String(best.amplitude), best.sharpe], name: '推荐' }] }
+          : undefined,
+      },
+      {
+        name: '最大回撤',
+        type: 'line',
+        yAxisIndex: 1,
+        data: sorted.map((r) => +(r.max_drawdown * 100).toFixed(2)),
+      },
+    ],
+  } as EChartsOption
+}
+
+function buildSentimentHeatmap(cal: S7Calibration): EChartsOption {
+  const results = cal.sentiment?.results ?? []
+  if (!results.length) return {} as EChartsOption
+  const zs = cal.sentiment.zscore_grid ?? [...new Set(results.map((r) => r.zscore_threshold))].sort((a, b) => a - b)
+  const fz = cal.sentiment.freeze_grid ?? [...new Set(results.map((r) => r.freeze_days))].sort((a, b) => a - b)
+  const zi = new Map(zs.map((z, i) => [z, i]))
+  const fi = new Map(fz.map((f, i) => [f, i]))
+  const data = results.map((r) => [zi.get(r.zscore_threshold), fi.get(r.freeze_days), r.sharpe])
+  const sharpe = results.map((r) => r.sharpe)
+  return {
+    tooltip: {
+      formatter: (p: unknown) => {
+        const v = (p as { value: number[] }).value
+        return `z=${zs[v[0]]}, freeze=${fz[v[1]]}<br/>Sharpe ${v[2].toFixed(3)}`
+      },
+    },
+    grid: { left: 60, right: 20, top: 20, bottom: 72 },
+    xAxis: { type: 'category', data: fz.map(String), name: 'freeze_days' },
+    yAxis: { type: 'category', data: zs.map(String), name: 'zscore' },
+    visualMap: {
+      min: Math.min(...sharpe),
+      max: Math.max(...sharpe),
+      show: true,
+      orient: 'horizontal',
+      left: 'center',
+      bottom: 0,
+      text: ['高', '低'],
+    },
+    series: [
+      {
+        type: 'heatmap',
+        data,
+        label: { show: true, formatter: (p: unknown) => (p as { value: number[] }).value[2].toFixed(2) },
+      },
+    ],
+  } as EChartsOption
+}
+
+function buildRedLineHistoryOption(history: RedLineHistoryPoint[]): EChartsOption {
+  if (!history.length) return {} as EChartsOption
+  const byTs = new Map<number, RedLineHistoryPoint[]>()
+  for (const h of history) {
+    const arr = byTs.get(h.ts) ?? []
+    arr.push(h)
+    byTs.set(h.ts, arr)
+  }
+  const times = [...byTs.keys()].sort((a, b) => a - b)
+  const names = Array.from(new Set(history.map((h) => h.name)))
+  const labels = names.map((n) => history.find((h) => h.name === n)?.label || n)
+  const data = times.flatMap((t, ti) =>
+    (byTs.get(t) ?? []).map((p) => [ti, names.indexOf(p.name), p.level]),
+  )
+  return {
+    tooltip: {
+      formatter: (p: unknown) => {
+        const v = (p as { value: [number, number, string] }).value
+        const name = names[v[1]]
+        const label = labels[v[1]]
+        const pt = (byTs.get(times[v[0]]) ?? []).find((h) => h.name === name)
+        const level = v[2]
+        const lv = LEVEL_LABEL[level as RedLineLevel] ?? level
+        return `${label} · ${formatTime(times[v[0]])}<br/>状态：${lv}${pt && pt.value != null ? `（值 ${fmtRedValue(pt.value)}）` : ''}`
+      },
+    },
+    grid: { left: 120, right: 20, top: 20, bottom: 44 },
+    xAxis: { type: 'category', data: times.map((t) => formatTime(t)) },
+    yAxis: { type: 'category', data: labels },
+    visualMap: {
+      show: false,
+      dimension: 2,
+      pieces: [
+        { value: 'ok', color: '#52c41a' },
+        { value: 'warning', color: '#faad14' },
+        { value: 'critical', color: '#ff4d4f' },
+        { value: 'unknown', color: '#8a93a6' },
+      ],
+    },
+    series: [{ type: 'heatmap', data }],
+  } as EChartsOption
 }
 
 function RedLineCard({ redLine }: { redLine: RedLine }): JSX.Element {
@@ -139,7 +354,13 @@ function RedLineCard({ redLine }: { redLine: RedLine }): JSX.Element {
         </Tag>
       </div>
       <div className="mono" style={{ fontSize: 22, fontWeight: 700, color, margin: '8px 0' }}>
-        {redLine.value == null ? '—' : redLine.value}
+        {typeof redLine.value === 'boolean'
+          ? redLine.value
+            ? '异常'
+            : '正常'
+          : redLine.value == null
+            ? '—'
+            : redLine.value}
       </div>
       <div style={{ fontSize: 12, color: '#8a93a6' }}>
         阈值：{redLine.threshold == null ? '—' : redLine.threshold}
@@ -212,8 +433,45 @@ const positionColumns: TableColumnsType<ShadowPosition> = [
     title: '方向',
     dataIndex: 'side',
     key: 'side',
-    width: 90,
+    width: 80,
     render: (v: string) => <Tag color={v === 'short' ? 'orange' : 'green'}>{v ?? '—'}</Tag>,
+  },
+  {
+    title: '现价',
+    dataIndex: 'last_price',
+    key: 'last_price',
+    align: 'right',
+    render: (v: number | null) => (v == null ? '—' : v.toFixed(2)),
+  },
+  {
+    title: '成本',
+    dataIndex: 'entry_price',
+    key: 'entry_price',
+    align: 'right',
+    render: (v: number | null) => (v == null ? '—' : v.toFixed(2)),
+  },
+  {
+    title: '盈亏',
+    dataIndex: 'pnl',
+    key: 'pnl',
+    align: 'right',
+    render: (v: number | null) =>
+      v == null ? (
+        '—'
+      ) : (
+        <span style={{ color: v >= 0 ? '#ff4d4f' : '#52c41a' }}>
+          {v >= 0 ? '+' : ''}
+          {formatMoney(v)}
+        </span>
+      ),
+  },
+  {
+    title: '盈亏%',
+    dataIndex: 'pnl_pct',
+    key: 'pnl_pct',
+    align: 'right',
+    render: (v: number | null) =>
+      v == null ? '—' : <span style={{ color: v >= 0 ? '#ff4d4f' : '#52c41a' }}>{formatRatio(v)}</span>,
   },
 ]
 
@@ -308,6 +566,8 @@ export default function QuantPage(): JSX.Element {
   const [schedule, setSchedule] = useState<QuantScheduleStatus | null>(null)
   const [runningShadow, setRunningShadow] = useState(false)
   const [runningCalibration, setRunningCalibration] = useState(false)
+  const [redLineHistory, setRedLineHistory] = useState<RedLineHistoryPoint[]>([])
+  const [historyLoading, setHistoryLoading] = useState(true)
 
   const [form] = Form.useForm<{ root_path: string; name: string }>()
   const logRef = useRef<HTMLPreElement>(null)
@@ -398,6 +658,19 @@ export default function QuantPage(): JSX.Element {
     }
   }, [])
 
+  const refreshHistory = useCallback(async (): Promise<void> => {
+    try {
+      const { data } = await api.get<RedLineHistoryPoint[]>('/quant/redline-history', {
+        params: { limit: 300 },
+      })
+      setRedLineHistory(Array.isArray(data) ? data : [])
+    } catch {
+      setRedLineHistory([])
+    } finally {
+      setHistoryLoading(false)
+    }
+  }, [])
+
   useEffect(() => {
     void refreshStatus()
     void refreshProjects()
@@ -407,11 +680,13 @@ export default function QuantPage(): JSX.Element {
     void refreshShadow()
     void refreshCalibration()
     void refreshSchedule()
-  }, [refreshStatus, refreshProjects, refreshProcesses, refreshCommands, refreshLogs, refreshShadow, refreshCalibration, refreshSchedule])
+    void refreshHistory()
+  }, [refreshStatus, refreshProjects, refreshProcesses, refreshCommands, refreshLogs, refreshShadow, refreshCalibration, refreshSchedule, refreshHistory])
 
   const onRedLineAlert = useCallback(() => {
     void refreshStatus()
-  }, [refreshStatus])
+    void refreshHistory()
+  }, [refreshStatus, refreshHistory])
 
   const onLogLine = useCallback((data: unknown) => {
     let line: string
@@ -436,7 +711,8 @@ export default function QuantPage(): JSX.Element {
   const onQuantShadowRan = useCallback(() => {
     void refreshShadow()
     void refreshSchedule()
-  }, [refreshShadow, refreshSchedule])
+    void refreshHistory()
+  }, [refreshShadow, refreshSchedule, refreshHistory])
 
   const onQuantCalibrated = useCallback(() => {
     void refreshCalibration()
@@ -693,8 +969,15 @@ export default function QuantPage(): JSX.Element {
                 {LEVEL_LABEL[status.overall] ?? status.overall}
               </Tag>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                {formatTime(status.timestamp)}
+                上次运行：{status.last_run ? formatIso(status.last_run) : formatTime(status.timestamp)}
               </Typography.Text>
+              {status.data_freshness_days != null ? (
+                <Tag
+                  color={status.data_freshness_days <= 1 ? 'green' : status.data_freshness_days <= 3 ? 'orange' : 'red'}
+                >
+                  数据新鲜度 {status.data_freshness_days} 天
+                </Tag>
+              ) : null}
             </Space>
             <Row gutter={[12, 12]}>
               {(status.red_lines ?? []).map((rl) => (
@@ -704,6 +987,23 @@ export default function QuantPage(): JSX.Element {
               ))}
             </Row>
           </Space>
+        )}
+      </Card>
+
+      <Card
+        title="红线历史"
+        extra={
+          <Button size="small" icon={<ReloadOutlined />} onClick={() => void refreshHistory()}>
+            刷新
+          </Button>
+        }
+      >
+        {historyLoading ? (
+          <Spin />
+        ) : redLineHistory.length === 0 ? (
+          <Empty description="暂无红线历史 — 每日影子运行后累积" />
+        ) : (
+          <EChart option={buildRedLineHistoryOption(redLineHistory)} height={320} />
         )}
       </Card>
 
@@ -757,16 +1057,56 @@ export default function QuantPage(): JSX.Element {
               <Col xs={12} sm={8} md={4}>
                 <Statistic title="成交笔数" value={shadow.equity?.n_fills ?? 0} />
               </Col>
+              <Col xs={12} sm={8} md={4}>
+                <Statistic
+                  title="期末现金"
+                  value={shadow.equity?.final_cash ?? 0}
+                  precision={2}
+                  formatter={(v) => formatMoney(Number(v))}
+                />
+              </Col>
+              <Col xs={12} sm={8} md={4}>
+                <Statistic title="年化收益" value={formatRatio(shadow.equity?.annualized_return)} />
+              </Col>
+              <Col xs={12} sm={8} md={4}>
+                <Statistic title="交易日" value={shadow.equity?.n_days ?? 0} suffix="天" />
+              </Col>
+              <Col xs={12} sm={8} md={4}>
+                <Statistic
+                  title="累计成本"
+                  value={shadow.equity?.total_commission ?? 0}
+                  precision={2}
+                  formatter={(v) => formatMoney(Number(v))}
+                />
+              </Col>
             </Row>
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              观察日期：{shadow.last_trading_date ?? shadow.as_of} · 上次运行：{shadow.last_run}
+              观察日期：{formatIso(shadow.last_trading_date ?? shadow.as_of)} · 上次运行：{formatIso(shadow.last_run)}
             </Typography.Text>
+            {shadow.equity_curve?.length ? (
+              <Row gutter={[12, 12]}>
+                <Col xs={24} lg={12}>
+                  <Card size="small" title="净值 vs HS300 基准">
+                    <EChart option={buildEquityOption(shadow)} height={260} />
+                  </Card>
+                </Col>
+                <Col xs={24} lg={12}>
+                  <Card size="small" title="回撤 + 超额收益">
+                    <EChart option={buildDrawdownExcessOption(shadow)} height={260} />
+                  </Card>
+                </Col>
+              </Row>
+            ) : null}
             <Descriptions size="small" column={{ xs: 2, sm: 3, md: 5 }} bordered>
               <Descriptions.Item label="PEAD 幅度">{shadow.s7_params?.amplitude ?? '—'}</Descriptions.Item>
               <Descriptions.Item label="舆情 z 阈值">{shadow.s7_params?.zscore_threshold ?? '—'}</Descriptions.Item>
               <Descriptions.Item label="冻结天数">{shadow.s7_params?.freeze_days ?? '—'}</Descriptions.Item>
               <Descriptions.Item label="冲击 bps">{shadow.s7_params?.slippage_bps ?? '—'}</Descriptions.Item>
               <Descriptions.Item label="佣金 bps">{shadow.s7_params?.commission_bps ?? '—'}</Descriptions.Item>
+              <Descriptions.Item label="仓位 cut">{shadow.s7_params?.position_cut ?? '—'}</Descriptions.Item>
+              <Descriptions.Item label="最低佣金">{shadow.s7_params?.min_commission ?? '—'}</Descriptions.Item>
+              <Descriptions.Item label="印花税 bps">{shadow.s7_params?.stamp_tax_sell_bps ?? '—'}</Descriptions.Item>
+              <Descriptions.Item label="过户费 bps">{shadow.s7_params?.transfer_fee_bps ?? '—'}</Descriptions.Item>
             </Descriptions>
             <Typography.Text strong>当日 TopN 目标持仓</Typography.Text>
             <Table<ShadowPosition>
@@ -807,10 +1147,28 @@ export default function QuantPage(): JSX.Element {
         ) : (
           <Space direction="vertical" style={{ width: '100%' }} size={12}>
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              回校窗口：{calibration.window?.start} ~ {calibration.window?.end} · 自动写回：
-              {calibration.auto_apply ? '是' : '否'} · 运行时间：{calibration.last_run}
+              回校窗口：{formatIso(calibration.window?.start)} ~ {formatIso(calibration.window?.end)} · 自动写回：
+              {calibration.auto_apply ? '是' : '否'} · 运行时间：{formatIso(calibration.last_run)}
             </Typography.Text>
             <CalibrationOverview cal={calibration} />
+            {calibration.amplitude?.results?.length || calibration.sentiment?.results?.length ? (
+              <Row gutter={[12, 12]}>
+                {calibration.amplitude?.results?.length ? (
+                  <Col xs={24} lg={12}>
+                    <Card size="small" title="幅度扫描（Sharpe vs 幅度）">
+                      <EChart option={buildAmplitudeOption(calibration)} height={260} />
+                    </Card>
+                  </Col>
+                ) : null}
+                {calibration.sentiment?.results?.length ? (
+                  <Col xs={24} lg={12}>
+                    <Card size="small" title="舆情阈值热力图（z × freeze × Sharpe）">
+                      <EChart option={buildSentimentHeatmap(calibration)} height={260} />
+                    </Card>
+                  </Col>
+                ) : null}
+              </Row>
+            ) : null}
             {calibration.applied?.changed && Object.keys(calibration.applied.changed).length > 0 ? (
               <Table
                 rowKey={(r) => r.path}
