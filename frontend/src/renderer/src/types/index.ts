@@ -320,9 +320,24 @@ export interface QuantScheduleStatus {
   shadow_daily_time: string
   calibrate_time: string
   shadow_auto_email: boolean
+  autopilot_enabled: boolean
   scheduler_running: boolean
   last_shadow_run: Record<string, unknown> | null
   last_calibration_run: Record<string, unknown> | null
+  last_autopilot_run: Record<string, unknown> | null
+}
+
+export interface AutopilotState {
+  mode: string
+  gross_scale: number | null
+  reason: string
+  since_date: string | null
+  last_evaluated: string | null
+  last_calibrate: string | null
+  last_monitor: string | null
+  last_mine: string | null
+  factor_decayed: boolean
+  extra: Record<string, unknown>
 }
 
 

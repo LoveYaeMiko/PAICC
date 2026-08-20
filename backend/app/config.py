@@ -38,6 +38,10 @@ DEFAULTS: dict[str, Any] = {
     "quant_shadow_daily_time": "17:30",
     "quant_calibrate_time": "18:00",
     "quant_shadow_auto_email": "true",
+    # Drive the daily job with FQA's end-to-end autopilot closed loop
+    # (shadow → kill-switch risk gate → periodic §7 re-calibration → factor-decay
+    # monitor) instead of a bare ``shadow`` run. Disable to fall back to shadow-only.
+    "quant_autopilot_enabled": "true",
     # LLM
     "llm_provider": "deepseek",
     "llm_model": "deepseek-chat",

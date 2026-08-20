@@ -5,6 +5,7 @@ import {
   LineChartOutlined,
   PlayCircleOutlined,
   ReloadOutlined,
+  RobotOutlined,
   SaveOutlined,
   ScanOutlined,
   StopOutlined,
@@ -36,6 +37,7 @@ import { api } from '@/services/api'
 import { confirmOperation } from '@/services/confirm'
 import { useWsEvent } from '@/services/ws'
 import type {
+  AutopilotState,
   QuantCommand,
   QuantProcessInfo,
   QuantProject,
@@ -77,6 +79,18 @@ const LEVEL_LABEL: Record<RedLineLevel, string> = {
   warning: '警告',
   critical: '严重',
   unknown: '未知',
+}
+
+const AUTOPILOT_MODE_COLOR: Record<string, string> = {
+  normal: '#52c41a',
+  de_risk: '#faad14',
+  halt: '#ff4d4f',
+}
+
+const AUTOPILOT_MODE_LABEL: Record<string, string> = {
+  normal: '正常',
+  de_risk: '收缩',
+  halt: '走平',
 }
 
 // ECharts heatmap visualMap.pieces only matches numeric values (string values
@@ -568,8 +582,11 @@ export default function QuantPage(): JSX.Element {
   const [calibration, setCalibration] = useState<S7Calibration | null>(null)
   const [calibrationLoading, setCalibrationLoading] = useState(true)
   const [schedule, setSchedule] = useState<QuantScheduleStatus | null>(null)
+  const [autopilot, setAutopilot] = useState<AutopilotState | null>(null)
+  const [autopilotLoading, setAutopilotLoading] = useState(true)
   const [runningShadow, setRunningShadow] = useState(false)
   const [runningCalibration, setRunningCalibration] = useState(false)
+  const [runningAutopilot, setRunningAutopilot] = useState(false)
   const [redLineHistory, setRedLineHistory] = useState<RedLineHistoryPoint[]>([])
   const [historyLoading, setHistoryLoading] = useState(true)
 
@@ -662,6 +679,17 @@ export default function QuantPage(): JSX.Element {
     }
   }, [])
 
+  const refreshAutopilot = useCallback(async (): Promise<void> => {
+    try {
+      const { data } = await api.get<AutopilotState | null>('/quant/autopilot')
+      setAutopilot(data ?? null)
+    } catch {
+      setAutopilot(null)
+    } finally {
+      setAutopilotLoading(false)
+    }
+  }, [])
+
   const refreshHistory = useCallback(async (): Promise<void> => {
     try {
       const { data } = await api.get<RedLineHistoryPoint[]>('/quant/redline-history', {
@@ -685,7 +713,8 @@ export default function QuantPage(): JSX.Element {
     void refreshCalibration()
     void refreshSchedule()
     void refreshHistory()
-  }, [refreshStatus, refreshProjects, refreshProcesses, refreshCommands, refreshLogs, refreshShadow, refreshCalibration, refreshSchedule, refreshHistory])
+    void refreshAutopilot()
+  }, [refreshStatus, refreshProjects, refreshProcesses, refreshCommands, refreshLogs, refreshShadow, refreshCalibration, refreshSchedule, refreshHistory, refreshAutopilot])
 
   const onRedLineAlert = useCallback(() => {
     void refreshStatus()
@@ -723,11 +752,20 @@ export default function QuantPage(): JSX.Element {
     void refreshSchedule()
   }, [refreshCalibration, refreshSchedule])
 
+  const onQuantAutopilotRan = useCallback(() => {
+    void refreshAutopilot()
+    void refreshShadow()
+    void refreshCalibration()
+    void refreshSchedule()
+    void refreshHistory()
+  }, [refreshAutopilot, refreshShadow, refreshCalibration, refreshSchedule, refreshHistory])
+
   useWsEvent('red_line_alert', onRedLineAlert)
   useWsEvent('log_line', onLogLine)
   useWsEvent('quant_processes', onQuantProcesses)
   useWsEvent('quant_shadow_ran', onQuantShadowRan)
   useWsEvent('quant_calibrated', onQuantCalibrated)
+  useWsEvent('quant_autopilot_ran', onQuantAutopilotRan)
 
   useEffect(() => {
     const el = logRef.current
@@ -896,6 +934,22 @@ export default function QuantPage(): JSX.Element {
     }
   }
 
+  const handleRunAutopilot = async (): Promise<void> => {
+    const confirmationId = await confirmOperation('run_quant_autopilot', '运行自动闭环', {
+      note: '在 FQA 项目根目录执行 python cli.py autopilot：推进影子账本 → 风险闸门(kill-switch) → 周期回校/因子衰减监控 → 持久化档位',
+    })
+    if (!confirmationId) return
+    setRunningAutopilot(true)
+    try {
+      await api.post('/quant/autopilot/run', { confirmation_id: confirmationId })
+      notification.success({ message: '自动闭环已启动', description: '后台运行中，完成后将自动刷新并推送闭环日报' })
+    } catch (err) {
+      notification.error({ message: '启动失败', description: describeError(err) })
+    } finally {
+      setRunningAutopilot(false)
+    }
+  }
+
   const commandColumns: TableColumnsType<QuantCommand> = [
     { title: '名称', dataIndex: 'name', key: 'name' },
     {
@@ -1008,6 +1062,62 @@ export default function QuantPage(): JSX.Element {
           <Empty description="暂无红线历史 — 每日影子运行后累积" />
         ) : (
           <EChart option={buildRedLineHistoryOption(redLineHistory)} height={320} />
+        )}
+      </Card>
+
+      <Card
+        title="自动闭环 (Autopilot)"
+        extra={
+          <Space size={8}>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              {schedule?.autopilot_enabled ? '每日自动 · 影子→风险闸门→回校/监控' : '已禁用（回退为影子）'}
+            </Typography.Text>
+            <Button
+              size="small"
+              type="primary"
+              icon={<RobotOutlined />}
+              loading={runningAutopilot}
+              onClick={() => void handleRunAutopilot()}
+            >
+              运行闭环
+            </Button>
+            <Button size="small" icon={<ReloadOutlined />} onClick={() => void refreshAutopilot()}>
+              刷新
+            </Button>
+          </Space>
+        }
+      >
+        {autopilotLoading ? (
+          <Spin />
+        ) : autopilot == null ? (
+          <Empty description="尚未运行自动闭环 — 点击「运行闭环」驱动影子→风险闸门→回校/监控全链路" />
+        ) : (
+          <Space direction="vertical" style={{ width: '100%' }} size={12}>
+            <Space size={12} wrap>
+              <Typography.Text>当前档位：</Typography.Text>
+              <Tag color={AUTOPILOT_MODE_COLOR[autopilot.mode] ?? '#8a93a6'}>
+                {AUTOPILOT_MODE_LABEL[autopilot.mode] ?? autopilot.mode}
+              </Tag>
+              <Tag>总敞口 ×{autopilot.gross_scale ?? 1}</Tag>
+              {autopilot.factor_decayed ? (
+                <Tag color="warning">因子衰减</Tag>
+              ) : (
+                <Tag color="default">因子健康</Tag>
+              )}
+            </Space>
+            {autopilot.reason ? (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                档位原因：{autopilot.reason}
+              </Typography.Text>
+            ) : null}
+            <Descriptions size="small" column={{ xs: 2, sm: 3, md: 5 }} bordered>
+              <Descriptions.Item label="进入档位">{formatIso(autopilot.since_date)}</Descriptions.Item>
+              <Descriptions.Item label="上次评估">{formatIso(autopilot.last_evaluated)}</Descriptions.Item>
+              <Descriptions.Item label="上次回校">{formatIso(autopilot.last_calibrate)}</Descriptions.Item>
+              <Descriptions.Item label="上次监控">{formatIso(autopilot.last_monitor)}</Descriptions.Item>
+              <Descriptions.Item label="上次重挖">{formatIso(autopilot.last_mine)}</Descriptions.Item>
+            </Descriptions>
+          </Space>
         )}
       </Card>
 

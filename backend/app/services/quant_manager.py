@@ -875,6 +875,23 @@ def read_s7_calibration() -> dict[str, Any] | None:
     return None
 
 
+def read_autopilot_state() -> dict[str, Any] | None:
+    """Parse the FQA ``outputs/autopilot_state.json`` (emitted by ``cli.py autopilot``).
+
+    Carries the persisted kill-switch operating mode (normal / de_risk / halt), the
+    gross multiplier, the escalation reason and the cadence bookkeeping (last
+    calibrate / monitor / mine). ``None`` before the first autopilot run.
+    """
+    root = Path(_project_root())
+    for rel in ("outputs/autopilot_state.json", "autopilot_state.json"):
+        path = root / rel
+        if path.is_file():
+            data = _parse_json_file(path)
+            if isinstance(data, dict):
+                return data
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # Config file read / write
 # --------------------------------------------------------------------------- #

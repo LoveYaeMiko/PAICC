@@ -39,6 +39,7 @@ _lock = threading.Lock()
 
 _last_shadow_run: dict[str, Any] | None = None
 _last_calibration_run: dict[str, Any] | None = None
+_last_autopilot_run: dict[str, Any] | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -158,6 +159,79 @@ def _generate_shadow_commentary(report: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# autopilot (end-to-end adaptive closed loop)
+# --------------------------------------------------------------------------- #
+def _autopilot_summary_text(state: dict[str, Any] | None, status: dict[str, Any] | None) -> str:
+    """Fallback text body when FQA has not yet written ``autopilot_report.md``."""
+    state = state or {}
+    status = status or {}
+    eq = status.get("equity", {})
+    scale = state.get("gross_scale")
+    scale_txt = f"{scale:g}" if isinstance(scale, (int, float)) else "1"
+    lines = [
+        "# FQA 自动闭环日报",
+        "",
+        f"- 运行时间: {state.get('last_evaluated') or state.get('since_date')}",
+        f"- 观察日期: {status.get('last_trading_date') or status.get('as_of')}",
+        f"- 当前档位: {state.get('mode', 'normal')}（总敞口 ×{scale_txt}）",
+        f"- 最新净值: {eq.get('latest', 0):,.2f}　累计收益: {eq.get('total_return', 0):.2%}",
+        f"- 因子衰减: {'是' if state.get('factor_decayed') else '否'}",
+    ]
+    reason = state.get("reason")
+    if reason:
+        lines.append(f"- 档位原因: {reason}")
+    return "\n".join(lines) + "\n"
+
+
+def run_autopilot_daily() -> dict[str, Any]:
+    """Run FQA's end-to-end autopilot loop and email the report.
+
+    ``python cli.py autopilot`` advances the shadow (honouring the last kill-switch
+    decision), re-evaluates the risk gate, persists the operating mode, and runs the
+    periodic §7 re-calibration / factor-decay monitor on their own cadence. It is the
+    single daily entry point that closes the loop on the shadow book.
+    """
+    global _last_autopilot_run
+    result: dict[str, Any] = {"ok": False}
+    try:
+        proc = quant_manager.run_project_command("python cli.py autopilot", timeout=3600)
+        status = quant_manager.read_shadow_status()
+        state = quant_manager.read_autopilot_state()
+        report = _read_report("outputs/autopilot_report.md")
+
+        email: dict[str, Any] = {"ok": False, "error": "auto-email disabled"}
+        if settings.get_bool("quant_shadow_auto_email", True):
+            if not report:
+                report = _autopilot_summary_text(state, status)
+            if settings.get_bool("quant_commentary_enabled", True):
+                commentary = _generate_shadow_commentary(report)
+                if commentary:
+                    report = report.rstrip() + "\n\n---\n\n" + commentary
+            date = (status or {}).get("last_trading_date") or (status or {}).get("as_of")
+            email = mailer.send_mail(f"FQA 自动闭环日报 — {date}", report)
+
+        result = {
+            "ok": proc.get("returncode") == 0,
+            "returncode": proc.get("returncode"),
+            "mode": (state or {}).get("mode"),
+            "gross_scale": (state or {}).get("gross_scale"),
+            "factor_decayed": (state or {}).get("factor_decayed"),
+            "last_trading_date": (status or {}).get("last_trading_date"),
+            "emailed": bool(email.get("ok")),
+            "email": email,
+            "stderr_tail": (proc.get("stderr") or "")[-500:],
+        }
+        db.log_operation("quant_autopilot_run", {}, {k: v for k, v in result.items() if k != "stderr_tail"})
+        ws.publish("quant_autopilot_ran", result)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("autopilot daily run failed")
+        result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        ws.publish("quant_autopilot_ran", result)
+    _last_autopilot_run = result
+    return result
+
+
+# --------------------------------------------------------------------------- #
 # jobs
 # --------------------------------------------------------------------------- #
 def run_shadow_daily() -> dict[str, Any]:
@@ -248,8 +322,10 @@ def start_scheduler() -> None:
             scheduler = BackgroundScheduler()
             dh, dm = _parse_hhmm(settings.get("quant_shadow_daily_time"), (17, 30))
             ch, cm = _parse_hhmm(settings.get("quant_calibrate_time"), (18, 0))
+            autopilot = settings.get_bool("quant_autopilot_enabled", True)
+            daily_job = run_autopilot_daily if autopilot else run_shadow_daily
             scheduler.add_job(
-                run_shadow_daily,
+                daily_job,
                 CronTrigger(day_of_week="mon-fri", hour=dh, minute=dm),
                 id=SHADOW_JOB_ID, replace_existing=True,
                 misfire_grace_time=7200, coalesce=True,
@@ -264,8 +340,8 @@ def start_scheduler() -> None:
             _scheduler = scheduler
             _started = True
             logger.info(
-                "quant scheduler started (shadow mon-fri %02d:%02d, calibrate sat %02d:%02d)",
-                dh, dm, ch, cm,
+                "quant scheduler started (%s mon-fri %02d:%02d, calibrate sat %02d:%02d)",
+                "autopilot" if autopilot else "shadow", dh, dm, ch, cm,
             )
         except Exception:  # noqa: BLE001
             logger.exception("failed to start quant scheduler")
@@ -278,7 +354,9 @@ def get_status() -> dict[str, Any]:
         "shadow_daily_time": f"{dh:02d}:{dm:02d}",
         "calibrate_time": f"{ch:02d}:{cm:02d}",
         "shadow_auto_email": settings.get_bool("quant_shadow_auto_email", True),
+        "autopilot_enabled": settings.get_bool("quant_autopilot_enabled", True),
         "scheduler_running": _started,
         "last_shadow_run": _last_shadow_run,
         "last_calibration_run": _last_calibration_run,
+        "last_autopilot_run": _last_autopilot_run,
     }

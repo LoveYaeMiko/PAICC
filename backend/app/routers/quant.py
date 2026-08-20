@@ -168,6 +168,12 @@ def calibration_result() -> dict[str, Any] | None:
     return quant_manager.read_s7_calibration()
 
 
+@router.get("/autopilot")
+def autopilot_state() -> dict[str, Any] | None:
+    """Latest autopilot control state (kill-switch mode/gross/decay), or None before first run."""
+    return quant_manager.read_autopilot_state()
+
+
 @router.get("/schedule")
 def schedule_status() -> dict[str, Any]:
     """Quant scheduler configuration + last-run summaries."""
@@ -193,4 +199,12 @@ def run_calibrate(payload: RunCalibrationRequest) -> dict[str, Any]:
     """Trigger the §7 calibration run in the background (confirmed)."""
     require_confirmation(payload.confirmation_id, action="run_quant_calibrate")
     task_id = task_manager.start_task("quant_calibration_run", quant_scheduler.run_calibration)
+    return {"task_id": task_id, "status": "started"}
+
+
+@router.post("/autopilot/run")
+def run_autopilot(payload: RunShadowRequest) -> dict[str, Any]:
+    """Trigger the end-to-end autopilot loop in the background (confirmed)."""
+    require_confirmation(payload.confirmation_id, action="run_quant_autopilot")
+    task_id = task_manager.start_task("quant_autopilot_run", quant_scheduler.run_autopilot_daily)
     return {"task_id": task_id, "status": "started"}
