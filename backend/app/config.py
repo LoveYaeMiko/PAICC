@@ -28,9 +28,15 @@ DATA_DIR = Path(os.getenv("PAICC_DATA_DIR", str(BASE_DIR / "data")))
 LOGS_DIR = Path(os.getenv("PAICC_LOGS_DIR", str(BASE_DIR / "logs")))
 CHROMA_DIR = Path(os.getenv("PAICC_CHROMA_DIR", str(DATA_DIR / "chroma")))
 
+# FQA is the sibling quant repo — ``Desktop/FQA`` next to ``Desktop/PAICC``. The
+# default is derived from PAICC's own location so a checkout on any machine points
+# at the right sibling instead of a hardcoded developer path (overridable via the
+# Settings UI or the ``PAICC_QUANT_ROOT`` env var).
+_QUANT_ROOT_DEFAULT = str(BASE_DIR.parent / "FQA")
+
 DEFAULTS: dict[str, Any] = {
     # Quant project
-    "quant_root": r"C:\Users\wyxwi\Desktop\FQA",
+    "quant_root": _QUANT_ROOT_DEFAULT,
     "quant_config_file": "configs/master_config.yaml",
     "quant_log_dir": "logs",
     "quant_dashboard_script": "",

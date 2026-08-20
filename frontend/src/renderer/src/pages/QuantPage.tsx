@@ -90,7 +90,7 @@ const AUTOPILOT_MODE_COLOR: Record<string, string> = {
 const AUTOPILOT_MODE_LABEL: Record<string, string> = {
   normal: '正常',
   de_risk: '收缩',
-  halt: '走平',
+  halt: '停止',
 }
 
 // ECharts heatmap visualMap.pieces only matches numeric values (string values
@@ -904,7 +904,7 @@ export default function QuantPage(): JSX.Element {
 
   const handleRunShadow = async (): Promise<void> => {
     const confirmationId = await confirmOperation('run_quant_shadow', '运行影子模式', {
-      note: '在 FQA 项目根目录执行 python cli.py shadow，回补 2026-01-01 至今的逐日目标持仓与 PnL',
+      note: '在 FQA 项目根目录执行 python cli.py shadow，逐日推进影子账本并记录目标持仓与 PnL（起点由 master_config.yaml 的 shadow.start_date 决定）',
     })
     if (!confirmationId) return
     setRunningShadow(true)
@@ -1149,7 +1149,7 @@ export default function QuantPage(): JSX.Element {
         {shadowLoading ? (
           <Spin />
         ) : shadow == null ? (
-          <Empty description="尚未运行影子模式 — 点击「立即运行」回补 2026-01-01 至今" />
+          <Empty description="尚未运行影子模式 — 点击「立即运行」逐日推进影子账本" />
         ) : (
           <Space direction="vertical" style={{ width: '100%' }} size={12}>
             <Row gutter={[12, 12]}>

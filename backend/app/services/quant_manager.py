@@ -32,14 +32,16 @@ from app.ws import publish
 
 logger = logging.getLogger(__name__)
 
-#: Canonical red-line definitions. ``kind="deviation"`` lines are percentage
-#: deviations mapped through warning/critical thresholds; ``kind="flag"`` lines are
-#: boolean-style anomalies (a truthy value means critical).
+#: Canonical red-line definitions. Labels mirror FQA's ``build_shadow_status`` so
+#: the fallback (payload without a label) stays in sync with the source of truth.
+#: ``kind="deviation"`` lines are percentage deviations mapped through
+#: warning/critical thresholds; ``kind="flag"`` lines are advisory anomalies
+#: (a truthy value means warning — FQA treats them as warnings, not hard halts).
 _RED_LINE_SPECS: list[dict[str, Any]] = [
-    {"name": "cost_deviation", "label": "成本偏离", "kind": "deviation", "threshold": 10.0, "critical": 20.0},
-    {"name": "short_leg_deviation", "label": "空腿偏差", "kind": "deviation", "threshold": 10.0, "critical": 20.0},
-    {"name": "regime_switch", "label": "Regime 切换", "kind": "flag", "threshold": None, "critical": None},
-    {"name": "pead_anomaly", "label": "PEAD 异常", "kind": "flag", "threshold": None, "critical": None},
+    {"name": "cost_deviation", "label": "成本模型偏差", "kind": "deviation", "threshold": 10.0, "critical": 20.0},
+    {"name": "short_leg_deviation", "label": "多空敞口失衡", "kind": "deviation", "threshold": 10.0, "critical": 20.0},
+    {"name": "regime_switch", "label": "趋势切换", "kind": "flag", "threshold": None, "critical": None},
+    {"name": "pead_anomaly", "label": "PEAD 覆盖异常", "kind": "flag", "threshold": None, "critical": None},
 ]
 
 _ERROR_MARKERS = ("error", "trace", "exception", "错误")
@@ -62,6 +64,19 @@ _tracked: dict[int, dict[str, Any]] = {}
 def list_projects() -> list[dict[str, Any]]:
     """Return all registered quant projects (active first)."""
     return db.query("SELECT * FROM quant_projects ORDER BY is_active DESC, id ASC")
+
+
+def _prefer_master_config(config_files: list[str]) -> str:
+    """Pick the canonical config from a detected list.
+
+    ``master_config.yaml`` is the single source of truth; prefer it over the
+    alphabetical first hit (which would otherwise be an arbitrary
+    ``configs/*.yaml`` sibling such as ``factor_thresholds.yaml``).
+    """
+    for path in config_files:
+        if Path(path).name == "master_config.yaml":
+            return path
+    return config_files[0]
 
 
 def register_project(
@@ -90,7 +105,7 @@ def register_project(
     if not (cfg and dash and logs):
         detected = detect_project(root_path)
         if not cfg and detected.get("config_files"):
-            cfg = detected["config_files"][0]
+            cfg = _prefer_master_config(detected["config_files"])
         if not dash and detected.get("dashboard_script"):
             dash = detected["dashboard_script"]
         if not logs and detected.get("log_dir"):
@@ -147,28 +162,18 @@ def detect_project(root_path: str) -> dict[str, Any]:
     if (root / "logs").is_dir():
         log_dir = str(root / "logs")
 
+    # The legacy "dashboard script" contract (``python <script> --json``) is gone;
+    # FQA's single source of truth is ``python cli.py shadow`` →
+    # ``outputs/shadow_status.json``. Keep the field (the DB column still exists
+    # for backward compatibility) but stop auto-detecting a script.
     dashboard_script: str | None = None
-    for ep in entry_points:
-        if "dashboard" in Path(ep).name.lower():
-            dashboard_script = ep
-            break
-    if dashboard_script is None:
-        for candidate in (
-            "scripts/phase10_dashboard.py", "phase10_dashboard.py", "src/phase10_dashboard.py",
-            "src/paper/shadow.py", "src/calibration.py",
-        ):
-            if (root / candidate).is_file():
-                dashboard_script = candidate
-                break
 
+    # A project "has" a quant surface when the FQA shadow/autopilot outputs exist
+    # — no longer keyed off legacy ``phase10_dashboard.*`` / ``red_lines.json``.
     has_simulation_dashboard = bool(
-        (root / "outputs" / "phase10_dashboard.json").is_file()
-        or (root / "outputs" / "shadow_status.json").is_file()
+        (root / "outputs" / "shadow_status.json").is_file()
         or (root / "outputs" / "s7_calibration.json").is_file()
-        or (root / "data" / "red_lines.json").is_file()
-        or (root / "scripts" / "phase10_dashboard.py").is_file()
-        or (root / "src" / "paper" / "shadow.py").is_file()
-        or any("dashboard" in f.lower() for f in config_files)
+        or (root / "outputs" / "autopilot_state.json").is_file()
     )
 
     return {
@@ -192,76 +197,43 @@ def save_report_to_kb(title: str, text: str) -> dict[str, Any]:
 def get_status() -> dict[str, Any]:
     """Return the four canonical red lines plus an aggregate ``overall`` severity.
 
-    Resolution order:
+    The red lines come from the FQA shadow-mode run (``outputs/shadow_status.json``),
+    which carries each line's own ``label`` / ``level`` / ``threshold`` / ``critical``.
+    Before the first shadow run there is no status yet: report every line with
+    ``level="unknown"`` and detail ``"shadow status not found"``.
 
-    1. if ``quant_dashboard_script`` is configured, run ``python <script> --json``
-       with cwd = project root (10s timeout) and parse the JSON;
-    2. else parse ``outputs/phase10_dashboard.json`` or ``data/red_lines.json``;
-    3. else parse the project config YAML for threshold keys and report every line
-       with ``level="unknown"`` and detail ``"dashboard not found"``.
+    The legacy ``python <script> --json`` dashboard contract and the
+    ``phase10_dashboard.json`` / ``data/red_lines.json`` intermediates are gone —
+    FQA's single source of truth is the shadow status now.
     """
     timestamp = time.time()
     root = Path(_project_root())
 
-    # (a) dashboard script
-    script = str(settings.get("quant_dashboard_script", "") or "").strip()
-    if script:
-        data = _run_dashboard_script(root, script)
-        if data is not None:
-            return _build_status(data, source=f"script:{script}", timestamp=timestamp)
-
-    # (b) dashboard JSON files (shadow_status.json feeds the four red lines from
-    # the real shadow-mode run so the dashboard stops showing "unknown").
-    for rel in ("outputs/phase10_dashboard.json", "data/red_lines.json", "outputs/shadow_status.json"):
+    for rel in ("outputs/shadow_status.json", "shadow_status.json"):
         path = root / rel
         if path.is_file():
             data = _parse_json_file(path)
             if data is not None:
                 return _build_status(data, source=rel, timestamp=timestamp)
 
-    # (c) config thresholds, unknown level
-    thresholds = _load_thresholds_from_config(root)
-    red_lines: list[dict[str, Any]] = []
-    for spec in _RED_LINE_SPECS:
-        threshold = spec.get("threshold")
-        critical = spec.get("critical")
-        cfg = thresholds.get(spec["name"])
-        if cfg:
-            threshold = cfg.get("threshold", threshold)
-            critical = cfg.get("critical", critical)
-        red_lines.append(
-            {
-                "name": spec["name"],
-                "label": spec["label"],
-                "level": "unknown",
-                "value": None,
-                "threshold": threshold,
-                "critical": critical,
-                "detail": "dashboard not found",
-            }
-        )
+    red_lines: list[dict[str, Any]] = [
+        {
+            "name": spec["name"],
+            "label": spec["label"],
+            "level": "unknown",
+            "value": None,
+            "threshold": spec.get("threshold"),
+            "critical": spec.get("critical"),
+            "detail": "shadow status not found",
+        }
+        for spec in _RED_LINE_SPECS
+    ]
     return {
         "timestamp": timestamp,
         "overall": _overall([rl["level"] for rl in red_lines]),
         "red_lines": red_lines,
-        "source": "config",
+        "source": "none",
     }
-
-
-def _run_dashboard_script(root: Path, script: str) -> Any | None:
-    try:
-        proc = subprocess.run(
-            ["python", script, "--json"],
-            cwd=str(root),
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("quant dashboard script failed: %s", exc)
-        return None
-    out = (proc.stdout or "") or (proc.stderr or "")
-    return _parse_json(out)
 
 
 def _parse_json(text: str) -> Any | None:
@@ -348,6 +320,7 @@ def _extract_line(payload: Any, spec: dict[str, Any]) -> dict[str, Any]:
     level: Any = None
     threshold = spec.get("threshold")
     critical = spec.get("critical")
+    label = spec["label"]
     detail = ""
 
     if isinstance(raw, dict):
@@ -357,6 +330,9 @@ def _extract_line(payload: Any, spec: dict[str, Any]) -> dict[str, Any]:
         level = raw.get("level", raw.get("status"))
         threshold = raw.get("threshold", raw.get("warning", threshold))
         critical = raw.get("critical", critical)
+        # FQA's shadow status carries the canonical Chinese label; prefer it and
+        # fall back to the spec so a label rename on the FQA side flows through.
+        label = raw.get("label") or label
         detail = str(raw.get("detail", raw.get("message", "")))
     else:
         value = raw
@@ -366,7 +342,7 @@ def _extract_line(payload: Any, spec: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "name": name,
-        "label": spec["label"],
+        "label": label,
         "level": _normalize_level(level),
         "value": value,
         "threshold": threshold,
@@ -426,7 +402,9 @@ def _level_for(spec: dict[str, Any], value: Any) -> str:
     if value is None or value == "":
         return "unknown"
     if spec["kind"] == "flag":
-        return "critical" if _truthy(value) else "ok"
+        # FQA emits flag lines as advisory warnings ("warning"/"ok"), never a
+        # hard halt — keep the fallback consistent with that semantics.
+        return "warning" if _truthy(value) else "ok"
     try:
         num = float(value)
     except (TypeError, ValueError):
@@ -469,49 +447,6 @@ def _overall(levels: list[str]) -> str:
     if any(level == "unknown" for level in levels):
         return "unknown"
     return "ok"
-
-
-def _load_thresholds_from_config(root: Path) -> dict[str, dict[str, Any]]:
-    config_dir = root / "configs"
-    candidates = [
-        config_dir / "master_config.yaml",
-        root / "master_config.yaml",
-        config_dir / "factor_thresholds.yaml",
-    ]
-    merged: dict[str, Any] = {}
-    for path in candidates:
-        if not path.is_file():
-            continue
-        data = _load_yaml(path)
-        if isinstance(data, dict):
-            merged.update(data)
-
-    result: dict[str, dict[str, Any]] = {}
-    for spec in _RED_LINE_SPECS:
-        if spec["kind"] != "deviation":
-            continue
-        name = spec["name"]
-        entry: dict[str, Any] = {}
-        for key in (f"{name}_threshold", f"{name}_warning", f"{name}_critical"):
-            val = _find_key(merged, key)
-            if _is_number(val):
-                if key.endswith("_critical"):
-                    entry["critical"] = float(val)
-                else:
-                    entry["threshold"] = float(val)
-        if not entry:
-            val = _find_key(merged, name)
-            if _is_number(val):
-                entry["threshold"] = float(val)
-        if entry:
-            result[name] = entry
-    return result
-
-
-def _is_number(value: Any) -> bool:
-    if isinstance(value, bool):
-        return False
-    return isinstance(value, (int, float))
 
 
 def _load_yaml(path: Path) -> Any:
@@ -1100,14 +1035,16 @@ def _seed_default_commands() -> None:
         has_entry = (root / "src" / "cli.py").is_file() or (root / "cli.py").is_file()
         if not has_entry:
             continue
-        db.execute(
-            "INSERT INTO quant_commands(project_id, name, command, description) VALUES (?, ?, ?, ?)",
-            (project["id"], "CLI 帮助", "python cli.py --help", "量化项目 CLI 帮助"),
-        )
-        db.execute(
-            "INSERT INTO quant_commands(project_id, name, command, description) VALUES (?, ?, ?, ?)",
-            (project["id"], "Phase10 回测", "python scripts/phase10_backtest.py --help", "Phase10 回测帮助"),
-        )
+        for name, command, description in (
+            ("CLI 帮助", "python cli.py --help", "量化项目 CLI 帮助"),
+            ("回测", "python cli.py backtest --help", "回测因子公式（PIT 数据）"),
+            ("影子模式", "python cli.py shadow --help", "影子模式 — 逐日记录目标持仓与 PnL"),
+            ("自动闭环", "python cli.py autopilot --help", "自动闭环 — shadow → 风险闸门 → 回校/监控"),
+        ):
+            db.execute(
+                "INSERT INTO quant_commands(project_id, name, command, description) VALUES (?, ?, ?, ?)",
+                (project["id"], name, command, description),
+            )
 
 
 def _start_watchdog() -> None:
