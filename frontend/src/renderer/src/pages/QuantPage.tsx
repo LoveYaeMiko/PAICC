@@ -11,6 +11,7 @@ import {
   StopOutlined,
 } from '@ant-design/icons'
 import {
+  Alert,
   Button,
   Card,
   Col,
@@ -579,11 +580,14 @@ export default function QuantPage(): JSX.Element {
 
   const [shadow, setShadow] = useState<ShadowStatus | null>(null)
   const [shadowLoading, setShadowLoading] = useState(true)
+  const [shadowError, setShadowError] = useState<string | null>(null)
   const [calibration, setCalibration] = useState<S7Calibration | null>(null)
   const [calibrationLoading, setCalibrationLoading] = useState(true)
+  const [calibrationError, setCalibrationError] = useState<string | null>(null)
   const [schedule, setSchedule] = useState<QuantScheduleStatus | null>(null)
   const [autopilot, setAutopilot] = useState<AutopilotState | null>(null)
   const [autopilotLoading, setAutopilotLoading] = useState(true)
+  const [autopilotError, setAutopilotError] = useState<string | null>(null)
   const [runningShadow, setRunningShadow] = useState(false)
   const [runningCalibration, setRunningCalibration] = useState(false)
   const [runningAutopilot, setRunningAutopilot] = useState(false)
@@ -652,8 +656,10 @@ export default function QuantPage(): JSX.Element {
     try {
       const { data } = await api.get<ShadowStatus | null>('/quant/shadow')
       setShadow(data ?? null)
-    } catch {
+      setShadowError(null)
+    } catch (err) {
       setShadow(null)
+      setShadowError(describeError(err))
     } finally {
       setShadowLoading(false)
     }
@@ -663,8 +669,10 @@ export default function QuantPage(): JSX.Element {
     try {
       const { data } = await api.get<S7Calibration | null>('/quant/calibration')
       setCalibration(data ?? null)
-    } catch {
+      setCalibrationError(null)
+    } catch (err) {
       setCalibration(null)
+      setCalibrationError(describeError(err))
     } finally {
       setCalibrationLoading(false)
     }
@@ -683,8 +691,10 @@ export default function QuantPage(): JSX.Element {
     try {
       const { data } = await api.get<AutopilotState | null>('/quant/autopilot')
       setAutopilot(data ?? null)
-    } catch {
+      setAutopilotError(null)
+    } catch (err) {
       setAutopilot(null)
+      setAutopilotError(describeError(err))
     } finally {
       setAutopilotLoading(false)
     }
@@ -742,10 +752,11 @@ export default function QuantPage(): JSX.Element {
   }, [])
 
   const onQuantShadowRan = useCallback(() => {
+    void refreshStatus()
     void refreshShadow()
     void refreshSchedule()
     void refreshHistory()
-  }, [refreshShadow, refreshSchedule, refreshHistory])
+  }, [refreshStatus, refreshShadow, refreshSchedule, refreshHistory])
 
   const onQuantCalibrated = useCallback(() => {
     void refreshCalibration()
@@ -753,12 +764,13 @@ export default function QuantPage(): JSX.Element {
   }, [refreshCalibration, refreshSchedule])
 
   const onQuantAutopilotRan = useCallback(() => {
+    void refreshStatus()
     void refreshAutopilot()
     void refreshShadow()
     void refreshCalibration()
     void refreshSchedule()
     void refreshHistory()
-  }, [refreshAutopilot, refreshShadow, refreshCalibration, refreshSchedule, refreshHistory])
+  }, [refreshStatus, refreshAutopilot, refreshShadow, refreshCalibration, refreshSchedule, refreshHistory])
 
   useWsEvent('red_line_alert', onRedLineAlert)
   useWsEvent('log_line', onLogLine)
@@ -1089,6 +1101,8 @@ export default function QuantPage(): JSX.Element {
       >
         {autopilotLoading ? (
           <Spin />
+        ) : autopilotError != null ? (
+          <Alert type="error" showIcon message="自动闭环输出损坏" description={autopilotError} />
         ) : autopilot == null ? (
           <Empty description="尚未运行自动闭环 — 点击「运行闭环」驱动影子→风险闸门→回校/监控全链路" />
         ) : (
@@ -1115,7 +1129,7 @@ export default function QuantPage(): JSX.Element {
               <Descriptions.Item label="上次评估">{formatIso(autopilot.last_evaluated)}</Descriptions.Item>
               <Descriptions.Item label="上次回校">{formatIso(autopilot.last_calibrate)}</Descriptions.Item>
               <Descriptions.Item label="上次监控">{formatIso(autopilot.last_monitor)}</Descriptions.Item>
-              <Descriptions.Item label="上次重挖">{formatIso(autopilot.last_mine)}</Descriptions.Item>
+              <Descriptions.Item label="重挖状态">{String(autopilot.extra?.remine ?? '未运行')}</Descriptions.Item>
             </Descriptions>
           </Space>
         )}
@@ -1148,6 +1162,8 @@ export default function QuantPage(): JSX.Element {
       >
         {shadowLoading ? (
           <Spin />
+        ) : shadowError != null ? (
+          <Alert type="error" showIcon message="影子模式输出损坏" description={shadowError} />
         ) : shadow == null ? (
           <Empty description="尚未运行影子模式 — 点击「立即运行」逐日推进影子账本" />
         ) : (
@@ -1262,6 +1278,8 @@ export default function QuantPage(): JSX.Element {
       >
         {calibrationLoading ? (
           <Spin />
+        ) : calibrationError != null ? (
+          <Alert type="error" showIcon message="回校输出损坏" description={calibrationError} />
         ) : calibration == null ? (
           <Empty description="尚未运行回校 — 用积累的真实时点数据校准 §7 三项" />
         ) : (

@@ -335,7 +335,6 @@ export interface AutopilotState {
   last_evaluated: string | null
   last_calibrate: string | null
   last_monitor: string | null
-  last_mine: string | null
   factor_decayed: boolean
   extra: Record<string, unknown>
 }

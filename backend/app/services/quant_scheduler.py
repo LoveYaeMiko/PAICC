@@ -84,7 +84,7 @@ def _shadow_summary_text(status: dict[str, Any]) -> str:
         "",
     ]
     for rl in status.get("red_lines", []):
-        lines.append(f"- [{rl.get('level')}] {rl.get('name')}: {rl.get('value')}　{rl.get('detail')}")
+        lines.append(f"- [{rl.get('level')}] {rl.get('label') or rl.get('name')}: {rl.get('value')}　{rl.get('detail')}")
     return "\n".join(lines) + "\n"
 
 

@@ -159,19 +159,28 @@ def tail_log(lines: int = 100) -> list[str]:
 @router.get("/shadow")
 def shadow_status() -> dict[str, Any] | None:
     """Latest shadow-mode status (净值/PnL/持仓/红线), or None before the first run."""
-    return quant_manager.read_shadow_status()
+    try:
+        return quant_manager.read_shadow_status()
+    except quant_manager.OutputCorruptError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.get("/calibration")
 def calibration_result() -> dict[str, Any] | None:
     """Latest §7 calibration result (PEAD 幅度/舆情阈值/成本模型), or None."""
-    return quant_manager.read_s7_calibration()
+    try:
+        return quant_manager.read_s7_calibration()
+    except quant_manager.OutputCorruptError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.get("/autopilot")
 def autopilot_state() -> dict[str, Any] | None:
     """Latest autopilot control state (kill-switch mode/gross/decay), or None before first run."""
-    return quant_manager.read_autopilot_state()
+    try:
+        return quant_manager.read_autopilot_state()
+    except quant_manager.OutputCorruptError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.get("/schedule")

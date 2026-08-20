@@ -759,6 +759,27 @@ def run_project_command(command: str, timeout: int = 1800) -> dict[str, Any]:
     }
 
 
+class OutputCorruptError(Exception):
+    """An FQA output JSON exists but cannot be parsed as a dict (corrupt/empty)."""
+
+
+def _read_output_json(root: Path, rels: tuple[str, ...]) -> dict[str, Any] | None:
+    """Read the first existing FQA output JSON from ``rels``.
+
+    ``None`` means *never run* (no file yet). Raises :class:`OutputCorruptError`
+    when a file exists but fails to parse as a dict, so the panel can surface
+    "output is corrupt" instead of misreporting "never run".
+    """
+    for rel in rels:
+        path = root / rel
+        if path.is_file():
+            data = _parse_json_file(path)
+            if isinstance(data, dict):
+                return data
+            raise OutputCorruptError(f"FQA output 损坏或不可读: {path.name}")
+    return None
+
+
 def read_shadow_status() -> dict[str, Any] | None:
     """Parse the FQA ``outputs/shadow_status.json`` (emitted by ``cli.py shadow``).
 
@@ -767,14 +788,10 @@ def read_shadow_status() -> dict[str, Any] | None:
     factor setup, not just the numeric outputs.
     """
     root = Path(_project_root())
-    for rel in ("outputs/shadow_status.json", "shadow_status.json"):
-        path = root / rel
-        if path.is_file():
-            data = _parse_json_file(path)
-            if isinstance(data, dict):
-                data.setdefault("strategy", _read_strategy_config(root))
-                return data
-    return None
+    data = _read_output_json(root, ("outputs/shadow_status.json", "shadow_status.json"))
+    if data is not None:
+        data.setdefault("strategy", _read_strategy_config(root))
+    return data
 
 
 def _read_strategy_config(root: Path) -> dict[str, Any]:
@@ -800,14 +817,9 @@ def _read_strategy_config(root: Path) -> dict[str, Any]:
 
 def read_s7_calibration() -> dict[str, Any] | None:
     """Parse the FQA ``outputs/s7_calibration.json`` (emitted by ``cli.py calibrate``)."""
-    root = Path(_project_root())
-    for rel in ("outputs/s7_calibration.json", "s7_calibration.json"):
-        path = root / rel
-        if path.is_file():
-            data = _parse_json_file(path)
-            if isinstance(data, dict):
-                return data
-    return None
+    return _read_output_json(
+        Path(_project_root()), ("outputs/s7_calibration.json", "s7_calibration.json")
+    )
 
 
 def read_autopilot_state() -> dict[str, Any] | None:
@@ -817,14 +829,9 @@ def read_autopilot_state() -> dict[str, Any] | None:
     gross multiplier, the escalation reason and the cadence bookkeeping (last
     calibrate / monitor / mine). ``None`` before the first autopilot run.
     """
-    root = Path(_project_root())
-    for rel in ("outputs/autopilot_state.json", "autopilot_state.json"):
-        path = root / rel
-        if path.is_file():
-            data = _parse_json_file(path)
-            if isinstance(data, dict):
-                return data
-    return None
+    return _read_output_json(
+        Path(_project_root()), ("outputs/autopilot_state.json", "autopilot_state.json")
+    )
 
 
 # --------------------------------------------------------------------------- #
