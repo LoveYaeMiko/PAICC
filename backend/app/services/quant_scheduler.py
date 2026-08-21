@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -144,6 +145,28 @@ async def _commentary_chat(prompt: str) -> str:
     return str(result.get("content") or "").strip()
 
 
+def _failure_email_text(title: str, proc: dict[str, Any]) -> str:
+    """Body for a daily-run *failure* alert — never forward a stale report.
+
+    When ``python cli.py autopilot``/``shadow`` fails (e.g. the PIT database is
+    unreachable), the on-disk report is yesterday's — emailing it as "today's"
+    report would silently duplicate stale numbers. Alert the operator instead.
+    """
+    lines = [
+        f"# {title}",
+        "",
+        f"- 时间: {datetime.now().isoformat(timespec='seconds')}",
+        f"- 命令: `{proc.get('command')}`",
+        f"- 返回码: {proc.get('returncode')}",
+        "",
+        "## 错误输出（尾部）",
+        "```",
+        (proc.get('stderr') or '')[-800:],
+        "```",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def _generate_shadow_commentary(report: str) -> str:
     """Ask the LLM (as a financial expert) to comment on the daily report.
 
@@ -195,23 +218,31 @@ def run_autopilot_daily() -> dict[str, Any]:
     result: dict[str, Any] = {"ok": False}
     try:
         proc = quant_manager.run_project_command("python cli.py autopilot", timeout=3600)
+        ok = proc.get("returncode") == 0
         status = quant_manager.read_shadow_status()
         state = quant_manager.read_autopilot_state()
         report = _read_report("outputs/autopilot_report.md")
 
         email: dict[str, Any] = {"ok": False, "error": "auto-email disabled"}
         if settings.get_bool("quant_shadow_auto_email", True):
-            if not report:
-                report = _autopilot_summary_text(state, status)
-            if settings.get_bool("quant_commentary_enabled", True):
-                commentary = _generate_shadow_commentary(report)
-                if commentary:
-                    report = report.rstrip() + "\n\n---\n\n" + commentary
-            date = (status or {}).get("last_trading_date") or (status or {}).get("as_of")
-            email = mailer.send_mail(f"FQA 自动闭环日报 — {date}", report)
+            if ok:
+                if not report:
+                    report = _autopilot_summary_text(state, status)
+                if settings.get_bool("quant_commentary_enabled", True):
+                    commentary = _generate_shadow_commentary(report)
+                    if commentary:
+                        report = report.rstrip() + "\n\n---\n\n" + commentary
+                date = (status or {}).get("last_trading_date") or (status or {}).get("as_of")
+                email = mailer.send_mail(f"FQA 自动闭环日报 — {date}", report)
+            else:
+                # Run failed (PIT DB down, etc.) — the on-disk report is stale, so
+                # alert the operator instead of forwarding yesterday's numbers.
+                email = mailer.send_mail(
+                    "FQA 自动闭环运行失败", _failure_email_text("FQA 自动闭环运行失败", proc)
+                )
 
         result = {
-            "ok": proc.get("returncode") == 0,
+            "ok": ok,
             "returncode": proc.get("returncode"),
             "mode": (state or {}).get("mode"),
             "gross_scale": (state or {}).get("gross_scale"),
@@ -240,22 +271,28 @@ def run_shadow_daily() -> dict[str, Any]:
     result: dict[str, Any] = {"ok": False}
     try:
         proc = quant_manager.run_project_command("python cli.py shadow", timeout=3600)
+        ok = proc.get("returncode") == 0
         status = quant_manager.read_shadow_status()
         report = _read_report("outputs/shadow_report.md")
 
         email: dict[str, Any] = {"ok": False, "error": "auto-email disabled"}
-        if settings.get_bool("quant_shadow_auto_email", True) and status is not None:
-            if not report:
-                report = _shadow_summary_text(status)
-            if settings.get_bool("quant_commentary_enabled", True):
-                commentary = _generate_shadow_commentary(report)
-                if commentary:
-                    report = report.rstrip() + "\n\n---\n\n" + commentary
-            subject = f"FQA 影子模式日报 — {status.get('last_trading_date') or status.get('as_of')}"
-            email = mailer.send_mail(subject, report)
+        if settings.get_bool("quant_shadow_auto_email", True):
+            if ok and status is not None:
+                if not report:
+                    report = _shadow_summary_text(status)
+                if settings.get_bool("quant_commentary_enabled", True):
+                    commentary = _generate_shadow_commentary(report)
+                    if commentary:
+                        report = report.rstrip() + "\n\n---\n\n" + commentary
+                subject = f"FQA 影子模式日报 — {status.get('last_trading_date') or status.get('as_of')}"
+                email = mailer.send_mail(subject, report)
+            elif not ok:
+                email = mailer.send_mail(
+                    "FQA 影子模式运行失败", _failure_email_text("FQA 影子模式运行失败", proc)
+                )
 
         result = {
-            "ok": proc.get("returncode") == 0,
+            "ok": ok,
             "command": proc.get("command"),
             "returncode": proc.get("returncode"),
             "last_trading_date": status.get("last_trading_date") if status else None,
@@ -280,17 +317,22 @@ def run_calibration() -> dict[str, Any]:
     result: dict[str, Any] = {"ok": False}
     try:
         proc = quant_manager.run_project_command("python cli.py calibrate", timeout=3600)
+        ok = proc.get("returncode") == 0
         cal = quant_manager.read_s7_calibration()
         report = _read_report("outputs/s7_calibration.md")
 
         email: dict[str, Any] = {"ok": False, "error": "no result"}
-        if cal is not None:
+        if ok and cal is not None:
             if not report:
                 report = _calibration_summary_text(cal)
             email = mailer.send_mail(f"FQA §7 回校报告 — {cal.get('as_of')}", report)
+        elif not ok:
+            email = mailer.send_mail(
+                "FQA §7 回校运行失败", _failure_email_text("FQA §7 回校运行失败", proc)
+            )
 
         result = {
-            "ok": proc.get("returncode") == 0,
+            "ok": ok,
             "returncode": proc.get("returncode"),
             "as_of": cal.get("as_of") if cal else None,
             "applied": cal.get("applied", {}).get("changed", {}) if cal else {},

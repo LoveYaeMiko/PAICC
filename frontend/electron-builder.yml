@@ -12,6 +12,11 @@ asarUnpack:
 win:
   target:
     - nsis
+  # We ship unsigned (no code-signing cert) and don't need a custom icon/version
+  # resource. Disabling exe editing skips the winCodeSign toolchain download, which
+  # otherwise fails on Windows because its 7z bundles macOS symlinks that need the
+  # SeCreateSymbolicLinkPrivilege to extract.
+  signAndEditExecutable: false
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true

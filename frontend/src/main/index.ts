@@ -98,10 +98,14 @@ function makeCirclePng(size = 16, color: [number, number, number] = [74, 144, 22
 // ---------------------------------------------------------------------------
 function findBackendDir(): string {
   const candidates = [
+    process.env.PAICC_BACKEND_DIR,
     resolve(app.getAppPath(), '..', 'backend'),
     resolve(process.resourcesPath || '', 'backend'),
-  ]
-  return candidates.find((p) => existsSync(p)) || candidates[0]
+    // Packaged builds don't sit next to a backend checkout, so fall back to the
+    // user's PAICC project directory (where the backend + venv live).
+    resolve(app.getPath('home'), 'Desktop', 'PAICC', 'backend'),
+  ].filter((p): p is string => Boolean(p))
+  return candidates.find((p) => existsSync(join(p, 'run.py'))) || candidates[0]
 }
 
 function findPython(): string {
