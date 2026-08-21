@@ -759,6 +759,117 @@ def run_project_command(command: str, timeout: int = 1800) -> dict[str, Any]:
     }
 
 
+# --------------------------------------------------------------------------- #
+# PIT database (Docker Postgres) pre-flight
+# --------------------------------------------------------------------------- #
+# The daily autopilot/shadow/calibrate runs need the point-in-time store, which
+# in production is a Dockerized Postgres (``fqa-pit-db``). Docker Desktop may not
+# be running when the 17:30 scheduler fires (machine rebooted, or Docker closed),
+# so ``ensure_pit_db_up`` brings the whole stack up *before* the CLI run instead
+# of letting the run fail on an unreachable PIT store.
+
+_DOCKER_DESKTOP_EXE = r"C:\Program Files\Docker\Docker\Docker Desktop.exe"
+_PIT_CONTAINER = "fqa-pit-db"
+
+#: Stage budget (seconds): daemon wait / compose up / container-health wait.
+_DOCKER_DAEMON_WAIT = 120
+_DOCKER_COMPOSE_TIMEOUT = 120
+_PIT_HEALTH_WAIT = 60
+
+
+def _run_docker(args: list[str], cwd: str | None = None, timeout: int = 60) -> subprocess.CompletedProcess | None:
+    """Run ``docker <args>`` without a shell; ``None`` on spawn/OS error."""
+    try:
+        return subprocess.run(
+            ["docker", *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            cwd=cwd,
+        )
+    except Exception:  # noqa: BLE001 — FileNotFoundError / TimeoutExpired / etc.
+        return None
+
+
+def _docker_daemon_up() -> bool:
+    """True when the Docker engine answers ``docker info``."""
+    proc = _run_docker(["info", "--format", "{{.ServerVersion}}"], timeout=15)
+    return proc is not None and proc.returncode == 0
+
+
+def _launch_docker_desktop() -> bool:
+    """Start Docker Desktop if its launcher exists (best-effort, non-blocking)."""
+    exe = os.environ.get("DOCKER_DESKTOP_EXE") or _DOCKER_DESKTOP_EXE
+    if not Path(exe).is_file():
+        return False
+    try:
+        flags = getattr(subprocess, "DETACHED_PROCESS", 0)
+        subprocess.Popen(
+            [exe],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            creationflags=flags,
+        )
+        return True
+    except Exception:  # noqa: BLE001
+        logger.exception("failed to launch Docker Desktop %s", exe)
+        return False
+
+
+def _pit_container_healthy() -> bool:
+    """True when ``fqa-pit-db`` reports ``healthy`` (its healthcheck is pg_isready)."""
+    proc = _run_docker(
+        ["inspect", "--format", "{{.State.Health.Status}}", _PIT_CONTAINER],
+        timeout=15,
+    )
+    return proc is not None and proc.returncode == 0 and "healthy" in (proc.stdout or "")
+
+
+def ensure_pit_db_up() -> dict[str, Any]:
+    """Ensure the FQA PIT database is reachable before a daily run.
+
+    Brings up the whole chain that the CLI needs, in order:
+
+    1. Docker daemon — launch Docker Desktop if it isn't answering;
+    2. ``docker compose up -d`` in the project root (also creates on first use);
+    3. ``fqa-pit-db`` container health (``pg_isready``).
+
+    Never raises; returns ``{"ok", "stage", "detail"}`` so the caller can fail
+    fast with an operator alert instead of a doomed CLI run. Each stage has its
+    own budget (worst case ~5 min total).
+    """
+    root = _project_root()
+
+    # 1. daemon
+    if not _docker_daemon_up():
+        _launch_docker_desktop()
+        stage_deadline = time.time() + _DOCKER_DAEMON_WAIT
+        while not _docker_daemon_up() and time.time() < stage_deadline:
+            time.sleep(3)
+        if not _docker_daemon_up():
+            return {"ok": False, "stage": "docker_daemon",
+                    "detail": f"Docker 守护进程未在 {_DOCKER_DAEMON_WAIT}s 内就绪"}
+
+    # 2. compose up (restart:unless-stopped also auto-starts it, but an explicit
+    #    up covers the first run and any config change / manual stop).
+    proc = _run_docker(["compose", "up", "-d"], cwd=root, timeout=_DOCKER_COMPOSE_TIMEOUT)
+    if proc is None or proc.returncode != 0:
+        detail = (proc.stderr or "").strip() if proc else "docker compose 调用失败"
+        return {"ok": False, "stage": "compose_up", "detail": detail[-400:]}
+
+    # 3. container health
+    stage_deadline = time.time() + _PIT_HEALTH_WAIT
+    while not _pit_container_healthy() and time.time() < stage_deadline:
+        time.sleep(3)
+    if not _pit_container_healthy():
+        return {"ok": False, "stage": "health",
+                "detail": f"{_PIT_CONTAINER} 未在 {_PIT_HEALTH_WAIT}s 内变为 healthy"}
+    return {"ok": True, "stage": "healthy", "detail": "PIT 数据库就绪"}
+
+
 class OutputCorruptError(Exception):
     """An FQA output JSON exists but cannot be parsed as a dict (corrupt/empty)."""
 

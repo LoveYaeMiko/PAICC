@@ -167,6 +167,25 @@ def _failure_email_text(title: str, proc: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _ensure_pit_db_or_fail() -> dict[str, Any] | None:
+    """Ensure the PIT database is up before a daily run.
+
+    Returns ``None`` when the DB is ready. When Docker can't be brought up, returns
+    a synthetic failure ``proc`` (``returncode=None``) so the caller emits the
+    operator failure alert and skips a CLI run that would otherwise die on an
+    unreachable PIT store — the *actual* root cause of the stale-report loop.
+    """
+    db_up = quant_manager.ensure_pit_db_up()
+    if db_up.get("ok"):
+        return None
+    return {
+        "command": "ensure PIT DB (docker compose up -d)",
+        "returncode": None,
+        "stdout": "",
+        "stderr": f"PIT 数据库不可用 [{db_up.get('stage')}]: {db_up.get('detail')}",
+    }
+
+
 def _generate_shadow_commentary(report: str) -> str:
     """Ask the LLM (as a financial expert) to comment on the daily report.
 
@@ -217,7 +236,7 @@ def run_autopilot_daily() -> dict[str, Any]:
     global _last_autopilot_run
     result: dict[str, Any] = {"ok": False}
     try:
-        proc = quant_manager.run_project_command("python cli.py autopilot", timeout=3600)
+        proc = _ensure_pit_db_or_fail() or quant_manager.run_project_command("python cli.py autopilot", timeout=3600)
         ok = proc.get("returncode") == 0
         status = quant_manager.read_shadow_status()
         state = quant_manager.read_autopilot_state()
@@ -270,7 +289,7 @@ def run_shadow_daily() -> dict[str, Any]:
     global _last_shadow_run
     result: dict[str, Any] = {"ok": False}
     try:
-        proc = quant_manager.run_project_command("python cli.py shadow", timeout=3600)
+        proc = _ensure_pit_db_or_fail() or quant_manager.run_project_command("python cli.py shadow", timeout=3600)
         ok = proc.get("returncode") == 0
         status = quant_manager.read_shadow_status()
         report = _read_report("outputs/shadow_report.md")
@@ -316,7 +335,7 @@ def run_calibration() -> dict[str, Any]:
     global _last_calibration_run
     result: dict[str, Any] = {"ok": False}
     try:
-        proc = quant_manager.run_project_command("python cli.py calibrate", timeout=3600)
+        proc = _ensure_pit_db_or_fail() or quant_manager.run_project_command("python cli.py calibrate", timeout=3600)
         ok = proc.get("returncode") == 0
         cal = quant_manager.read_s7_calibration()
         report = _read_report("outputs/s7_calibration.md")
