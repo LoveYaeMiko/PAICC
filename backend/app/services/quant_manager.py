@@ -774,6 +774,8 @@ _PIT_CONTAINER = "fqa-pit-db"
 #: Stage budget (seconds): daemon wait / compose up / container-health wait.
 _DOCKER_DAEMON_WAIT = 120
 _DOCKER_COMPOSE_TIMEOUT = 120
+_DOCKER_COMPOSE_RETRIES = 3
+_DOCKER_COMPOSE_RETRY_DELAY = 5
 _PIT_HEALTH_WAIT = 60
 
 
@@ -831,11 +833,17 @@ def _pit_container_healthy() -> bool:
 def ensure_pit_db_up() -> dict[str, Any]:
     """Ensure the FQA PIT database is reachable before a daily run.
 
-    Brings up the whole chain that the CLI needs, in order:
+    The *real* success criterion is the container reporting ``healthy`` (its
+    healthcheck is ``pg_isready``) — not that ``docker compose up -d`` returned 0.
+    Right after a Docker Desktop restart the Linux engine can briefly answer 500
+    on an image-inspect while the container is already coming back up via
+    ``restart: unless-stopped`` (the 2026-08-22 calibration failure). So:
 
-    1. Docker daemon — launch Docker Desktop if it isn't answering;
-    2. ``docker compose up -d`` in the project root (also creates on first use);
-    3. ``fqa-pit-db`` container health (``pg_isready``).
+    1. Fast path — already healthy, don't touch Docker at all;
+    2. Docker daemon — launch Docker Desktop if it isn't answering;
+    3. ``docker compose up -d`` with a few retries for transient engine errors;
+    4. container health — the final gate; a compose error is only reported if the
+       container never becomes healthy.
 
     Never raises; returns ``{"ok", "stage", "detail"}`` so the caller can fail
     fast with an operator alert instead of a doomed CLI run. Each stage has its
@@ -843,7 +851,11 @@ def ensure_pit_db_up() -> dict[str, Any]:
     """
     root = _project_root()
 
-    # 1. daemon
+    # 1. fast path — the DB is already serving, skip Docker entirely.
+    if _pit_container_healthy():
+        return {"ok": True, "stage": "already_up", "detail": "PIT 数据库已就绪"}
+
+    # 2. daemon
     if not _docker_daemon_up():
         _launch_docker_desktop()
         stage_deadline = time.time() + _DOCKER_DAEMON_WAIT
@@ -853,21 +865,28 @@ def ensure_pit_db_up() -> dict[str, Any]:
             return {"ok": False, "stage": "docker_daemon",
                     "detail": f"Docker 守护进程未在 {_DOCKER_DAEMON_WAIT}s 内就绪"}
 
-    # 2. compose up (restart:unless-stopped also auto-starts it, but an explicit
-    #    up covers the first run and any config change / manual stop).
-    proc = _run_docker(["compose", "up", "-d"], cwd=root, timeout=_DOCKER_COMPOSE_TIMEOUT)
-    if proc is None or proc.returncode != 0:
-        detail = (proc.stderr or "").strip() if proc else "docker compose 调用失败"
-        return {"ok": False, "stage": "compose_up", "detail": detail[-400:]}
+    # 3. compose up, tolerating transient engine errors (image-inspect 500 while
+    #    the engine warms up) and the restart policy already having done the work.
+    compose_err = ""
+    for _ in range(_DOCKER_COMPOSE_RETRIES):
+        proc = _run_docker(["compose", "up", "-d"], cwd=root, timeout=_DOCKER_COMPOSE_TIMEOUT)
+        if proc is not None and proc.returncode == 0:
+            compose_err = ""
+            break
+        compose_err = (proc.stderr or "").strip() if proc else "docker compose 调用失败"
+        if _pit_container_healthy():
+            compose_err = ""
+            break
+        time.sleep(_DOCKER_COMPOSE_RETRY_DELAY)
 
-    # 3. container health
+    # 4. container health — the actual gate.
     stage_deadline = time.time() + _PIT_HEALTH_WAIT
     while not _pit_container_healthy() and time.time() < stage_deadline:
         time.sleep(3)
-    if not _pit_container_healthy():
-        return {"ok": False, "stage": "health",
-                "detail": f"{_PIT_CONTAINER} 未在 {_PIT_HEALTH_WAIT}s 内变为 healthy"}
-    return {"ok": True, "stage": "healthy", "detail": "PIT 数据库就绪"}
+    if _pit_container_healthy():
+        return {"ok": True, "stage": "healthy", "detail": "PIT 数据库就绪"}
+    detail = compose_err or f"{_PIT_CONTAINER} 未在 {_PIT_HEALTH_WAIT}s 内变为 healthy"
+    return {"ok": False, "stage": "health", "detail": detail[-400:]}
 
 
 class OutputCorruptError(Exception):
