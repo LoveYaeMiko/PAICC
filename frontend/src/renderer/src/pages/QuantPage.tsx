@@ -164,6 +164,17 @@ function formatMoney(v: number | null | undefined): string {
   return v.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
+// The kill-switch reasons about *current* drawdown-from-peak (the last point of
+// the equity curve), not the historical max-drawdown. Surface it alongside the
+// historical figure so the panel doesn't imply the book is deeper underwater
+// than it actually is.
+function currentDrawdown(shadow: ShadowStatus): number | null {
+  const curve = shadow.equity_curve ?? []
+  const last = curve[curve.length - 1]
+  if (!last || last.drawdown == null) return null
+  return Math.abs(last.drawdown)
+}
+
 function isErrorLine(line: string): boolean {
   return /(error|trace|错误)/i.test(line)
 }
@@ -1179,7 +1190,10 @@ export default function QuantPage(): JSX.Element {
                 <Statistic title="Sharpe" value={shadow.equity?.sharpe ?? 0} precision={2} />
               </Col>
               <Col xs={12} sm={8} md={4}>
-                <Statistic title="最大回撤" value={formatRatio(shadow.equity?.max_drawdown)} />
+                <Statistic title="最大回撤(历史)" value={formatRatio(shadow.equity?.max_drawdown)} />
+              </Col>
+              <Col xs={12} sm={8} md={4}>
+                <Statistic title="当前回撤(距峰值)" value={formatRatio(currentDrawdown(shadow))} />
               </Col>
               <Col xs={12} sm={8} md={4}>
                 <Statistic title="数据新鲜度" value={shadow.data_freshness_days ?? 0} suffix="天" />
