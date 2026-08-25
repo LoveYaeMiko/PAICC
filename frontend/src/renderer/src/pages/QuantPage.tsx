@@ -1135,11 +1135,29 @@ export default function QuantPage(): JSX.Element {
                 档位原因：{autopilot.reason}
               </Typography.Text>
             ) : null}
+            {autopilot.decay_detail && Object.keys(autopilot.decay_detail).length > 0 ? (
+              <Space direction="vertical" size={2}>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  因子衰减明细：
+                </Typography.Text>
+                {Object.entries(autopilot.decay_detail).map(([formula, d]) => (
+                  <Typography.Text
+                    key={formula}
+                    type={d.decayed ? 'danger' : 'secondary'}
+                    style={{ fontSize: 12 }}
+                  >
+                    {formula}: ICIR {d.recent_icir != null ? d.recent_icir.toFixed(3) : '—'}（
+                    {d.decayed ? '衰减' : '正常'}）
+                  </Typography.Text>
+                ))}
+              </Space>
+            ) : null}
             <Descriptions size="small" column={{ xs: 2, sm: 3, md: 5 }} bordered>
               <Descriptions.Item label="进入档位">{formatIso(autopilot.since_date)}</Descriptions.Item>
               <Descriptions.Item label="上次评估">{formatIso(autopilot.last_evaluated)}</Descriptions.Item>
               <Descriptions.Item label="上次回校">{formatIso(autopilot.last_calibrate)}</Descriptions.Item>
               <Descriptions.Item label="上次监控">{formatIso(autopilot.last_monitor)}</Descriptions.Item>
+              <Descriptions.Item label="上次重挖">{formatIso(autopilot.last_remine)}</Descriptions.Item>
               <Descriptions.Item label="重挖状态">{String(autopilot.extra?.remine ?? '未运行')}</Descriptions.Item>
             </Descriptions>
           </Space>
