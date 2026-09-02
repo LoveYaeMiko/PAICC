@@ -34,6 +34,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import dayjs from 'dayjs'
 import type { EChartsOption } from 'echarts'
 import EChart from '@/components/EChart'
+import DualShadowPanel from '@/components/DualShadowPanel'
 import { api } from '@/services/api'
 import { confirmOperation } from '@/services/confirm'
 import { useWsEvent } from '@/services/ws'
@@ -1019,6 +1020,7 @@ export default function QuantPage(): JSX.Element {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <DualShadowPanel />
       <Card
         title="红线仪表盘"
         extra={

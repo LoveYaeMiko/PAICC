@@ -165,6 +165,18 @@ def shadow_status() -> dict[str, Any] | None:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+@router.get("/accounts")
+def shadow_accounts() -> dict[str, Any]:
+    """Dual-capital accounts: per-account status/report/autopilot payloads."""
+    return quant_manager.read_shadow_accounts()
+
+
+@router.get("/trades")
+def trade_records(account: str = "", limit: int = 200, date: str | None = None) -> dict[str, Any]:
+    """Detailed trade records (fills) + recent daily equity from one account ledger."""
+    return quant_manager.read_trade_records(account=account, limit=limit, date=date)
+
+
 @router.get("/calibration")
 def calibration_result() -> dict[str, Any] | None:
     """Latest §7 calibration result (PEAD 幅度/舆情阈值/成本模型), or None."""
@@ -216,4 +228,12 @@ def run_autopilot(payload: RunShadowRequest) -> dict[str, Any]:
     """Trigger the end-to-end autopilot loop in the background (confirmed)."""
     require_confirmation(payload.confirmation_id, action="run_quant_autopilot")
     task_id = task_manager.start_task("quant_autopilot_run", quant_scheduler.run_autopilot_daily)
+    return {"task_id": task_id, "status": "started"}
+
+
+@router.post("/weekly/run")
+def run_weekly(payload: RunShadowRequest) -> dict[str, Any]:
+    """Trigger the weekly auto closed-loop (retrain → promote gate) in the background."""
+    require_confirmation(payload.confirmation_id, action="run_quant_weekly")
+    task_id = task_manager.start_task("quant_weekly_run", quant_scheduler.run_weekly_cycle)
     return {"task_id": task_id, "status": "started"}

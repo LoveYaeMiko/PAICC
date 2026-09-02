@@ -965,6 +965,92 @@ def read_autopilot_state() -> dict[str, Any] | None:
 
 
 # --------------------------------------------------------------------------- #
+# Dual-capital accounts (A_200W / B_10W) — per-account status + trade records
+# --------------------------------------------------------------------------- #
+def _shadow_account_names() -> list[str]:
+    """Account names from ``shadow.accounts`` in the master config (fallback: legacy)."""
+    root = Path(_project_root())
+    cfg = _load_yaml(root / "configs" / "master_config.yaml")
+    accounts = (cfg or {}).get("shadow", {}).get("accounts") or []
+    names = [str(a.get("name")) for a in accounts if a.get("name")]
+    return names
+
+
+def read_shadow_accounts() -> dict[str, Any]:
+    """Per-account shadow payloads: ``{name: {status, report, autopilot}}``.
+
+    When no ``shadow.accounts`` are configured, returns ``{"default": {...}}``
+    with the legacy single-account files (backward compatible).
+    """
+    root = Path(_project_root())
+    names = _shadow_account_names() or [""]
+    out: dict[str, Any] = {}
+    for name in names:
+        suffix = f"_{name}" if name else ""
+        status = _read_output_json(
+            root, (f"outputs/shadow_status{suffix}.json",)
+        )
+        report = _read_report_file(root / f"outputs/shadow_report{suffix}.md")
+        state = _read_output_json(
+            root, (f"outputs/autopilot_state{suffix}.json",)
+        )
+        entry: dict[str, Any] = {"name": name or "default"}
+        if status is not None:
+            entry["status"] = status
+        if report:
+            entry["report"] = report
+        if state is not None:
+            entry["autopilot"] = state
+        out[name or "default"] = entry
+    return out
+
+
+def _read_report_file(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def read_trade_records(account: str = "", limit: int = 200, date: str | None = None) -> dict[str, Any]:
+    """Fills + daily equity from one account's shadow ledger.
+
+    ``account`` "" reads the legacy ledger; otherwise ``shadow_ledger_<name>.sqlite``.
+    ``date`` (ISO) filters fills to one trading day (the daily-report trades view).
+    """
+    import sqlite3
+
+    root = Path(_project_root())
+    suffix = f"_{account}" if account else ""
+    ledger = root / f"outputs/shadow_ledger{suffix}.sqlite"
+    if not ledger.is_file():
+        return {"account": account, "fills": [], "days": [], "note": "ledger not found"}
+    con = sqlite3.connect(f"file:{ledger}?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row
+    try:
+        if date:
+            rows = con.execute(
+                "SELECT seq, date, symbol, side, shares, price, commission, notional "
+                "FROM fills WHERE date = ? ORDER BY seq DESC LIMIT ?",
+                (date, limit),
+            ).fetchall()
+        else:
+            rows = con.execute(
+                "SELECT seq, date, symbol, side, shares, price, commission, notional "
+                "FROM fills ORDER BY seq DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        fills = [dict(r) for r in rows]
+        days = con.execute(
+            "SELECT date, cash, equity, gross_exposure, n_fills, commission "
+            "FROM daily_state ORDER BY date DESC LIMIT 60"
+        ).fetchall()
+        return {"account": account or "default", "fills": fills, "days": [dict(r) for r in days]}
+    finally:
+        con.close()
+
+
+# --------------------------------------------------------------------------- #
 # Config file read / write
 # --------------------------------------------------------------------------- #
 def get_config_text(project_id: int | None = None) -> dict[str, Any]:

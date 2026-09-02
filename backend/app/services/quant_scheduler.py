@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 SHADOW_JOB_ID = "quant_shadow_daily"
 CALIBRATE_JOB_ID = "quant_calibrate"
+WEEKLY_JOB_ID = "quant_weekly_cycle"
 
 _scheduler: BackgroundScheduler | None = None
 _started = False
@@ -41,6 +42,7 @@ _lock = threading.Lock()
 _last_shadow_run: dict[str, Any] | None = None
 _last_calibration_run: dict[str, Any] | None = None
 _last_autopilot_run: dict[str, Any] | None = None
+_last_weekly_run: dict[str, Any] | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -236,7 +238,7 @@ def run_autopilot_daily() -> dict[str, Any]:
     global _last_autopilot_run
     result: dict[str, Any] = {"ok": False}
     try:
-        proc = _ensure_pit_db_or_fail() or quant_manager.run_project_command("python cli.py autopilot", timeout=3600)
+        proc = _ensure_pit_db_or_fail() or quant_manager.run_project_command("python cli.py autopilot", timeout=7200)
         ok = proc.get("returncode") == 0
         status = quant_manager.read_shadow_status()
         state = quant_manager.read_autopilot_state()
@@ -281,6 +283,68 @@ def run_autopilot_daily() -> dict[str, Any]:
     return result
 
 
+def run_weekly_cycle() -> dict[str, Any]:
+    """Weekly auto closed-loop: fold the week's data into history and re-optimise.
+
+    Runs ``python cli.py weekly`` in the FQA root — retrains the LightGBM with
+    data through the latest bar and promotes the new artifact only if its
+    trailing Sharpe improves on the incumbent. Emails the weekly result.
+    """
+    global _last_weekly_run
+    result: dict[str, Any] = {"ok": False}
+    try:
+        proc = _ensure_pit_db_or_fail() or quant_manager.run_project_command("python cli.py weekly", timeout=7200)
+        ok = proc.get("returncode") == 0
+        weekly_json = _read_report("outputs/weekly.json")
+        import json as _json
+
+        weekly: dict[str, Any] = {}
+        try:
+            weekly = _json.loads(weekly_json) if weekly_json else {}
+        except ValueError:
+            weekly = {}
+
+        email: dict[str, Any] = {"ok": False, "error": "auto-email disabled"}
+        if settings.get_bool("quant_shadow_auto_email", True):
+            if ok:
+                subject = (
+                    f"FQA 周度闭环 — {weekly.get('date')} "
+                    f"{'promoted' if weekly.get('promoted') else 'kept'} "
+                    f"(sharpe {weekly.get('new_sharpe', 0):.3f})"
+                )
+                body = (
+                    f"# FQA 周度自动闭环\n\n"
+                    f"- 数据截至: {weekly.get('data_through')}\n"
+                    f"- 基线 Sharpe: {weekly.get('baseline_sharpe', 0):.3f}\n"
+                    f"- 新 Sharpe: {weekly.get('new_sharpe', 0):.3f}\n"
+                    f"- promote: {'是' if weekly.get('promoted') else '否（保留原工件）'}\n"
+                )
+                email = mailer.send_mail(subject, body)
+            else:
+                email = mailer.send_mail(
+                    "FQA 周度闭环运行失败", _failure_email_text("FQA 周度闭环运行失败", proc)
+                )
+
+        result = {
+            "ok": ok,
+            "returncode": proc.get("returncode"),
+            "promoted": bool(weekly.get("promoted", False)),
+            "baseline_sharpe": weekly.get("baseline_sharpe"),
+            "new_sharpe": weekly.get("new_sharpe"),
+            "data_through": weekly.get("data_through"),
+            "emailed": bool(email.get("ok")),
+            "stderr_tail": (proc.get("stderr") or "")[-500:],
+        }
+        db.log_operation("quant_weekly_run", {}, {k: v for k, v in result.items() if k != "stderr_tail"})
+        ws.publish("quant_weekly_ran", result)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("weekly cycle failed")
+        result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        ws.publish("quant_weekly_ran", result)
+    _last_weekly_run = result
+    return result
+
+
 # --------------------------------------------------------------------------- #
 # jobs
 # --------------------------------------------------------------------------- #
@@ -289,7 +353,7 @@ def run_shadow_daily() -> dict[str, Any]:
     global _last_shadow_run
     result: dict[str, Any] = {"ok": False}
     try:
-        proc = _ensure_pit_db_or_fail() or quant_manager.run_project_command("python cli.py shadow", timeout=3600)
+        proc = _ensure_pit_db_or_fail() or quant_manager.run_project_command("python cli.py shadow", timeout=7200)
         ok = proc.get("returncode") == 0
         status = quant_manager.read_shadow_status()
         report = _read_report("outputs/shadow_report.md")
@@ -397,12 +461,19 @@ def start_scheduler() -> None:
                 id=CALIBRATE_JOB_ID, replace_existing=True,
                 misfire_grace_time=86400, coalesce=True,
             )
+            wh, wm = _parse_hhmm(settings.get("quant_weekly_time"), (18, 0))
+            scheduler.add_job(
+                run_weekly_cycle,
+                CronTrigger(day_of_week="sun", hour=wh, minute=wm),
+                id=WEEKLY_JOB_ID, replace_existing=True,
+                misfire_grace_time=86400, coalesce=True,
+            )
             scheduler.start()
             _scheduler = scheduler
             _started = True
             logger.info(
-                "quant scheduler started (%s mon-fri %02d:%02d, calibrate sat %02d:%02d)",
-                "autopilot" if autopilot else "shadow", dh, dm, ch, cm,
+                "quant scheduler started (%s mon-fri %02d:%02d, calibrate sat %02d:%02d, weekly sun %02d:%02d)",
+                "autopilot" if autopilot else "shadow", dh, dm, ch, cm, wh, wm,
             )
         except Exception:  # noqa: BLE001
             logger.exception("failed to start quant scheduler")
@@ -411,13 +482,16 @@ def start_scheduler() -> None:
 def get_status() -> dict[str, Any]:
     dh, dm = _parse_hhmm(settings.get("quant_shadow_daily_time"), (17, 30))
     ch, cm = _parse_hhmm(settings.get("quant_calibrate_time"), (18, 0))
+    wh, wm = _parse_hhmm(settings.get("quant_weekly_time"), (18, 0))
     return {
         "shadow_daily_time": f"{dh:02d}:{dm:02d}",
         "calibrate_time": f"{ch:02d}:{cm:02d}",
+        "weekly_time": f"{wh:02d}:{wm:02d}",
         "shadow_auto_email": settings.get_bool("quant_shadow_auto_email", True),
         "autopilot_enabled": settings.get_bool("quant_autopilot_enabled", True),
         "scheduler_running": _started,
         "last_shadow_run": _last_shadow_run,
         "last_calibration_run": _last_calibration_run,
         "last_autopilot_run": _last_autopilot_run,
+        "last_weekly_run": _last_weekly_run,
     }
