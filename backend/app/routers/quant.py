@@ -187,10 +187,10 @@ def calibration_result() -> dict[str, Any] | None:
 
 
 @router.get("/autopilot")
-def autopilot_state() -> dict[str, Any] | None:
-    """Latest autopilot control state (kill-switch mode/gross/decay), or None before first run."""
+def autopilot_state() -> dict[str, Any]:
+    """Per-account autopilot control states (``{name: state}``) for the dual-track loop."""
     try:
-        return quant_manager.read_autopilot_state()
+        return quant_manager.read_autopilot_states()
     except quant_manager.OutputCorruptError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -202,9 +202,9 @@ def schedule_status() -> dict[str, Any]:
 
 
 @router.get("/redline-history")
-def redline_history(limit: int = 200) -> list[dict[str, Any]]:
-    """Persisted red-line snapshots (value/level over time) for trend charts."""
-    return quant_manager.redline_history(limit)
+def redline_history(limit: int = 200, account: str = "") -> list[dict[str, Any]]:
+    """Persisted red-line snapshots for one account (value/level over time)."""
+    return quant_manager.redline_history(limit, account=account)
 
 
 @router.post("/shadow/run")

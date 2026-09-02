@@ -160,10 +160,22 @@ export interface RedLineStatus {
   timestamp: number
   overall: RedLineLevel
   red_lines: RedLine[]
+  accounts: Record<string, AccountRedLineStatus>
   source: string
   last_run?: string
   as_of?: string
   data_freshness_days?: number
+}
+
+/** One account's red-line payload inside the dual-track /quant/status response. */
+export interface AccountRedLineStatus {
+  overall: RedLineLevel
+  red_lines: RedLine[]
+  last_trading_date?: string
+  data_freshness_days?: number
+  equity?: Partial<ShadowEquity>
+  last_run?: string
+  account_name?: string
 }
 
 export interface QuantProcessInfo {
@@ -253,9 +265,24 @@ export interface ShadowStatus {
   refreshed: Record<string, unknown>
   red_lines: ShadowRedLine[]
   strategy?: ShadowStrategy
+  account_name?: string
+  account_config?: ShadowAccountConfig
   equity_curve?: EquityPoint[]
   benchmark?: BenchmarkPoint[]
   excess_curve?: ExcessPoint[]
+}
+
+/** Per-account book config surfaced by FQA's shadow status (ML dual-track). */
+export interface ShadowAccountConfig {
+  cash: number
+  alpha_source: string
+  ml_artifacts: string[]
+  universe: string
+  long_pct: number
+  short_pct: number
+  rebalance_days: number
+  notional_floor: number
+  band_frac: number
 }
 
 export interface RedLineHistoryPoint {
@@ -267,6 +294,7 @@ export interface RedLineHistoryPoint {
   level: string
   value: number | string | null
   detail: string
+  account?: string
 }
 
 export interface S7AmplitudeResult {
@@ -319,12 +347,14 @@ export interface S7Calibration {
 export interface QuantScheduleStatus {
   shadow_daily_time: string
   calibrate_time: string
+  weekly_time?: string
   shadow_auto_email: boolean
   autopilot_enabled: boolean
   scheduler_running: boolean
   last_shadow_run: Record<string, unknown> | null
   last_calibration_run: Record<string, unknown> | null
   last_autopilot_run: Record<string, unknown> | null
+  last_weekly_run?: Record<string, unknown> | null
 }
 
 export interface AutopilotState {

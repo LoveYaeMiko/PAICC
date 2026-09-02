@@ -228,33 +228,43 @@ def _autopilot_summary_text(state: dict[str, Any] | None, status: dict[str, Any]
 
 
 def run_autopilot_daily() -> dict[str, Any]:
-    """Run FQA's end-to-end autopilot loop and email the report.
+    """Run FQA's dual-track end-to-end autopilot loop and email the report.
 
-    ``python cli.py autopilot`` advances the shadow (honouring the last kill-switch
-    decision), re-evaluates the risk gate, persists the operating mode, and runs the
-    periodic §7 re-calibration / factor-decay monitor on their own cadence. It is the
-    single daily entry point that closes the loop on the shadow book.
+    ``python cli.py autopilot`` advances each account's shadow (honouring its last
+    kill-switch decision), re-evaluates the per-account risk gate and persists the
+    operating mode (``autopilot_state_<name>.json``). ML accounts iterate their
+    model via the Sunday weekly job; factor-pool periodic tasks only run for pool
+    accounts. It is the single daily entry point that closes the loop.
     """
     global _last_autopilot_run
     result: dict[str, Any] = {"ok": False}
+    ws.publish("quant_autopilot_started", {"ts": datetime.now().isoformat(timespec="seconds")})
     try:
         proc = _ensure_pit_db_or_fail() or quant_manager.run_project_command("python cli.py autopilot", timeout=7200)
         ok = proc.get("returncode") == 0
-        status = quant_manager.read_shadow_status()
-        state = quant_manager.read_autopilot_state()
-        report = _read_report("outputs/autopilot_report.md")
+        states = quant_manager.read_autopilot_states()
+        accounts = quant_manager.read_shadow_accounts()
+        report_parts: list[str] = []
+        for name, state in states.items():
+            st = (accounts.get(name) or {}).get("status") or {}
+            rep = _read_report(f"outputs/autopilot_report_{name}.md")
+            if not rep:
+                rep = _autopilot_summary_text(state, st)
+            report_parts.append(f"## 账户 {name}\n\n{rep}")
+        report = "\n\n".join(report_parts) if report_parts else ""
 
         email: dict[str, Any] = {"ok": False, "error": "auto-email disabled"}
         if settings.get_bool("quant_shadow_auto_email", True):
             if ok:
                 if not report:
-                    report = _autopilot_summary_text(state, status)
+                    report = _autopilot_summary_text(None, None)
                 if settings.get_bool("quant_commentary_enabled", True):
                     commentary = _generate_shadow_commentary(report)
                     if commentary:
                         report = report.rstrip() + "\n\n---\n\n" + commentary
-                date = (status or {}).get("last_trading_date") or (status or {}).get("as_of")
-                email = mailer.send_mail(f"FQA 自动闭环日报 — {date}", report)
+                first = next(iter(states.values()), {}) or {}
+                date = first.get("last_evaluated")
+                email = mailer.send_mail(f"FQA 双资金轨自动闭环日报 — {date}", report)
             else:
                 # Run failed (PIT DB down, etc.) — the on-disk report is stale, so
                 # alert the operator instead of forwarding yesterday's numbers.
@@ -265,10 +275,8 @@ def run_autopilot_daily() -> dict[str, Any]:
         result = {
             "ok": ok,
             "returncode": proc.get("returncode"),
-            "mode": (state or {}).get("mode"),
-            "gross_scale": (state or {}).get("gross_scale"),
-            "factor_decayed": (state or {}).get("factor_decayed"),
-            "last_trading_date": (status or {}).get("last_trading_date"),
+            "accounts": sorted(states.keys()),
+            "modes": {n: (s or {}).get("mode") for n, s in states.items()},
             "emailed": bool(email.get("ok")),
             "email": email,
             "stderr_tail": (proc.get("stderr") or "")[-500:],
@@ -292,6 +300,7 @@ def run_weekly_cycle() -> dict[str, Any]:
     """
     global _last_weekly_run
     result: dict[str, Any] = {"ok": False}
+    ws.publish("quant_weekly_started", {"ts": datetime.now().isoformat(timespec="seconds")})
     try:
         proc = _ensure_pit_db_or_fail() or quant_manager.run_project_command("python cli.py weekly", timeout=7200)
         ok = proc.get("returncode") == 0
@@ -349,26 +358,32 @@ def run_weekly_cycle() -> dict[str, Any]:
 # jobs
 # --------------------------------------------------------------------------- #
 def run_shadow_daily() -> dict[str, Any]:
-    """Run the shadow mode and email the daily report."""
+    """Run the dual-track shadow mode and email the combined daily report."""
     global _last_shadow_run
     result: dict[str, Any] = {"ok": False}
+    ws.publish("quant_shadow_started", {"ts": datetime.now().isoformat(timespec="seconds")})
     try:
         proc = _ensure_pit_db_or_fail() or quant_manager.run_project_command("python cli.py shadow", timeout=7200)
         ok = proc.get("returncode") == 0
-        status = quant_manager.read_shadow_status()
-        report = _read_report("outputs/shadow_report.md")
+        accounts = quant_manager.read_shadow_accounts()
+        report_parts: list[str] = []
+        date: str | None = None
+        for name, entry in accounts.items():
+            st = entry.get("status") or {}
+            if not date:
+                date = st.get("last_trading_date") or st.get("as_of")
+            rep = entry.get("report") or _shadow_summary_text(st)
+            report_parts.append(f"## 账户 {name}\n\n{rep}")
+        report = "\n\n".join(report_parts) if report_parts else ""
 
         email: dict[str, Any] = {"ok": False, "error": "auto-email disabled"}
         if settings.get_bool("quant_shadow_auto_email", True):
-            if ok and status is not None:
-                if not report:
-                    report = _shadow_summary_text(status)
+            if ok and report:
                 if settings.get_bool("quant_commentary_enabled", True):
                     commentary = _generate_shadow_commentary(report)
                     if commentary:
                         report = report.rstrip() + "\n\n---\n\n" + commentary
-                subject = f"FQA 影子模式日报 — {status.get('last_trading_date') or status.get('as_of')}"
-                email = mailer.send_mail(subject, report)
+                email = mailer.send_mail(f"FQA 双资金轨影子日报 — {date}", report)
             elif not ok:
                 email = mailer.send_mail(
                     "FQA 影子模式运行失败", _failure_email_text("FQA 影子模式运行失败", proc)
@@ -378,8 +393,8 @@ def run_shadow_daily() -> dict[str, Any]:
             "ok": ok,
             "command": proc.get("command"),
             "returncode": proc.get("returncode"),
-            "last_trading_date": status.get("last_trading_date") if status else None,
-            "as_of": status.get("as_of") if status else None,
+            "accounts": sorted(accounts.keys()),
+            "last_trading_date": date,
             "emailed": bool(email.get("ok")),
             "email": email,
             "stderr_tail": (proc.get("stderr") or "")[-500:],
@@ -398,6 +413,7 @@ def run_calibration() -> dict[str, Any]:
     """Run the §7 calibration and email the report."""
     global _last_calibration_run
     result: dict[str, Any] = {"ok": False}
+    ws.publish("quant_calibration_started", {"ts": datetime.now().isoformat(timespec="seconds")})
     try:
         proc = _ensure_pit_db_or_fail() or quant_manager.run_project_command("python cli.py calibrate", timeout=3600)
         ok = proc.get("returncode") == 0
@@ -437,8 +453,63 @@ def run_calibration() -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # scheduler + status
 # --------------------------------------------------------------------------- #
+def _fire_missed_today_jobs() -> None:
+    """Catch up on scheduled jobs missed while the backend was down.
+
+    The in-process APScheduler only fires while the backend process lives, and
+    the Electron main spawns/kills the backend with the app window — so a closed
+    PAICC means the 17:30 daily loop never ran. On startup, check the operation
+    log for today's run (or a catch-up marker) and fire each missed job once.
+    """
+    import time as _time
+
+    now = datetime.now()
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_start = _time.mktime(midnight.timetuple())
+
+    def ran_any_today(actions: tuple[str, ...]) -> bool:
+        marks = ", ".join("?" for _ in actions)
+        rows = db.query(
+            f"SELECT id FROM operation_logs WHERE action IN ({marks}) AND timestamp >= ? LIMIT 1",
+            (*actions, day_start),
+        )
+        return bool(rows)
+
+    autopilot = settings.get_bool("quant_autopilot_enabled", True)
+    daily_job = run_autopilot_daily if autopilot else run_shadow_daily
+    dh, dm = _parse_hhmm(settings.get("quant_shadow_daily_time"), (17, 30))
+    ch, cm = _parse_hhmm(settings.get("quant_calibrate_time"), (18, 0))
+    wh, wm = _parse_hhmm(settings.get("quant_weekly_time"), (18, 0))
+
+    def fire_once(marker_action: str, check_actions: tuple[str, ...], job) -> None:
+        if ran_any_today(check_actions):
+            return
+        db.log_operation(marker_action, {"date": now.strftime("%Y-%m-%d")}, {"fired": True})
+        threading.Thread(target=job, daemon=True, name=f"quant-catchup-{marker_action}").start()
+        logger.info("catch-up: missed %s fired", marker_action)
+
+    if now.weekday() < 5 and (now.hour, now.minute) >= (dh, dm):
+        fire_once(
+            "quant_catchup_daily",
+            ("quant_autopilot_run", "quant_shadow_run", "quant_catchup_daily"),
+            daily_job,
+        )
+    if now.weekday() == 5 and (now.hour, now.minute) >= (ch, cm):
+        fire_once(
+            "quant_catchup_calibrate",
+            ("quant_calibration_run", "quant_catchup_calibrate"),
+            run_calibration,
+        )
+    if now.weekday() == 6 and (now.hour, now.minute) >= (wh, wm):
+        fire_once(
+            "quant_catchup_weekly",
+            ("quant_weekly_run", "quant_catchup_weekly"),
+            run_weekly_cycle,
+        )
+
+
 def start_scheduler() -> None:
-    """Idempotently start the shadow + calibration schedulers."""
+    """Idempotently start the shadow + calibration schedulers + startup catch-up."""
     global _scheduler, _started
     with _lock:
         if _started:
@@ -453,7 +524,10 @@ def start_scheduler() -> None:
                 daily_job,
                 CronTrigger(day_of_week="mon-fri", hour=dh, minute=dm),
                 id=SHADOW_JOB_ID, replace_existing=True,
-                misfire_grace_time=7200, coalesce=True,
+                # 24h grace: if the machine was asleep at 17:30 and wakes later
+                # (even the next morning), fire the missed daily loop once —
+                # the resumable FQA ledger backfills the missed trading days.
+                misfire_grace_time=86400, coalesce=True,
             )
             scheduler.add_job(
                 run_calibration,
@@ -477,6 +551,13 @@ def start_scheduler() -> None:
             )
         except Exception:  # noqa: BLE001
             logger.exception("failed to start quant scheduler")
+            return
+    # Startup catch-up — a backend that was down at the scheduled time (the app
+    # window closed) fires the missed job once instead of silently skipping the day.
+    try:
+        _fire_missed_today_jobs()
+    except Exception:  # noqa: BLE001
+        logger.exception("scheduler catch-up check failed")
 
 
 def get_status() -> dict[str, Any]:

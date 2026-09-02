@@ -51,7 +51,7 @@ _start_lock = threading.Lock()
 _observer: Any = None
 _last_overall: str | None = None
 _last_criticals: set[str] = set()
-_last_history_signature: tuple | None = None
+_last_history_signature: dict[str, str] | None = None
 
 #: PIDs spawned by :func:`run_command`, keyed by pid -> {pid, project_id, command, root}.
 _tracked_lock = threading.Lock()
@@ -195,44 +195,78 @@ def save_report_to_kb(title: str, text: str) -> dict[str, Any]:
 # Red-line status
 # --------------------------------------------------------------------------- #
 def get_status() -> dict[str, Any]:
-    """Return the four canonical red lines plus an aggregate ``overall`` severity.
+    """Return the dual-track red-line status: one entry per shadow account plus
+    an aggregate ``overall`` severity (worst across accounts).
 
-    The red lines come from the FQA shadow-mode run (``outputs/shadow_status.json``),
-    which carries each line's own ``label`` / ``level`` / ``threshold`` / ``critical``.
-    Before the first shadow run there is no status yet: report every line with
-    ``level="unknown"`` and detail ``"shadow status not found"``.
-
-    The legacy ``python <script> --json`` dashboard contract and the
-    ``phase10_dashboard.json`` / ``data/red_lines.json`` intermediates are gone —
-    FQA's single source of truth is the shadow status now.
+    The red lines come from the FQA shadow-mode runs
+    (``outputs/shadow_status_<name>.json``), which carry each line's own
+    ``label`` / ``level`` / ``threshold`` / ``critical``. Before the first shadow
+    run there is no status yet: report every line with ``level="unknown"`` and
+    detail ``"shadow status not found"``. The top-level ``red_lines`` field keeps
+    the first account's lines for backward compatibility.
     """
     timestamp = time.time()
     root = Path(_project_root())
+    payloads: dict[str, dict[str, Any]] = {}
+    for name in _shadow_account_names():
+        for rel in (f"outputs/shadow_status_{name}.json", f"shadow_status_{name}.json"):
+            path = root / rel
+            if path.is_file():
+                data = _parse_json_file(path)
+                if isinstance(data, dict):
+                    payloads[name] = data
+                break
+    if not payloads:
+        # legacy single-account file, kept for backward compatibility
+        for rel in ("outputs/shadow_status.json", "shadow_status.json"):
+            path = root / rel
+            if path.is_file():
+                data = _parse_json_file(path)
+                if isinstance(data, dict):
+                    payloads["default"] = data
+                break
 
-    for rel in ("outputs/shadow_status.json", "shadow_status.json"):
-        path = root / rel
-        if path.is_file():
-            data = _parse_json_file(path)
-            if data is not None:
-                return _build_status(data, source=rel, timestamp=timestamp)
-
-    red_lines: list[dict[str, Any]] = [
-        {
-            "name": spec["name"],
-            "label": spec["label"],
-            "level": "unknown",
-            "value": None,
-            "threshold": spec.get("threshold"),
-            "critical": spec.get("critical"),
-            "detail": "shadow status not found",
+    if not payloads:
+        red_lines: list[dict[str, Any]] = [
+            {
+                "name": spec["name"],
+                "label": spec["label"],
+                "level": "unknown",
+                "value": None,
+                "threshold": spec.get("threshold"),
+                "critical": spec.get("critical"),
+                "detail": "shadow status not found",
+            }
+            for spec in _RED_LINE_SPECS
+        ]
+        return {
+            "timestamp": timestamp,
+            "overall": _overall([rl["level"] for rl in red_lines]),
+            "red_lines": red_lines,
+            "accounts": {},
+            "source": "none",
         }
-        for spec in _RED_LINE_SPECS
-    ]
+
+    accounts: dict[str, dict[str, Any]] = {}
+    for name, payload in payloads.items():
+        red_lines = [_extract_line(payload, spec) for spec in _RED_LINE_SPECS]
+        accounts[name] = {
+            "overall": _overall([rl["level"] for rl in red_lines]),
+            "red_lines": red_lines,
+            "last_trading_date": payload.get("last_trading_date") or payload.get("as_of"),
+            "data_freshness_days": payload.get("data_freshness_days"),
+            "equity": payload.get("equity"),
+            "last_run": payload.get("last_run"),
+            "account_name": payload.get("account_name", name),
+        }
+    first = next(iter(accounts))
+    overall = _overall([a["overall"] for a in accounts.values()])
     return {
         "timestamp": timestamp,
-        "overall": _overall([rl["level"] for rl in red_lines]),
-        "red_lines": red_lines,
-        "source": "none",
+        "overall": overall,
+        "accounts": accounts,
+        "red_lines": accounts[first]["red_lines"],
+        "source": "dual-account shadow",
     }
 
 
@@ -964,6 +998,25 @@ def read_autopilot_state() -> dict[str, Any] | None:
     )
 
 
+def read_autopilot_states() -> dict[str, Any]:
+    """Per-account autopilot states: ``{name: state}`` from
+    ``outputs/autopilot_state_<name>.json`` (dual-track), falling back to the
+    legacy single-account ``outputs/autopilot_state.json``.
+    """
+    root = Path(_project_root())
+    names = _shadow_account_names()
+    out: dict[str, Any] = {}
+    for name in names:
+        state = _read_output_json(root, (f"outputs/autopilot_state_{name}.json",))
+        if state is not None:
+            out[name] = state
+    if not out:
+        legacy = read_autopilot_state()
+        if legacy is not None:
+            out["default"] = legacy
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Dual-capital accounts (A_200W / B_10W) — per-account status + trade records
 # --------------------------------------------------------------------------- #
@@ -1149,9 +1202,24 @@ def _project_root_and_log_dir() -> tuple[str, str]:
 
 
 # --------------------------------------------------------------------------- #
-# Red-line history (persisted snapshots for drift / trend charts)
+# Red-line history (persisted snapshots for drift / trend charts, per account)
 # --------------------------------------------------------------------------- #
-def _latest_db_signature() -> tuple[tuple[str, str, str], ...] | None:
+def _migrate_redline_history() -> None:
+    """Add the ``account`` column to ``quant_redline_history`` if missing."""
+    try:
+        cols = db.query("PRAGMA table_info(quant_redline_history)")
+    except Exception:  # noqa: BLE001 — table missing (fresh DB) is handled by the schema init
+        return
+    names = {str(r.get("name", "")) for r in cols}
+    if "account" not in names:
+        try:
+            db.execute("ALTER TABLE quant_redline_history ADD COLUMN account TEXT NOT NULL DEFAULT ''")
+            logger.info("quant_redline_history: added account column")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("quant_redline_history migration failed: %s", exc)
+
+
+def _latest_db_signature(account: str) -> tuple[tuple[str, str, str], ...] | None:
     """Reconstruct the signature of the most recent snapshot already in the DB.
 
     All rows of one snapshot share a ``ts``; this lets a freshly-started process
@@ -1159,7 +1227,9 @@ def _latest_db_signature() -> tuple[tuple[str, str, str], ...] | None:
     """
     rows = db.query(
         "SELECT name, level, value FROM quant_redline_history "
-        "WHERE ts = (SELECT MAX(ts) FROM quant_redline_history) ORDER BY id"
+        "WHERE account = ? AND ts = (SELECT MAX(ts) FROM quant_redline_history WHERE account = ?) "
+        "ORDER BY id",
+        (account, account),
     )
     if not rows:
         return None
@@ -1168,8 +1238,8 @@ def _latest_db_signature() -> tuple[tuple[str, str, str], ...] | None:
     )
 
 
-def _append_redline_history(status: dict[str, Any]) -> None:
-    """Persist a snapshot of the red lines when their values change.
+def _append_redline_history(account: str, account_status: dict[str, Any]) -> None:
+    """Persist a snapshot of one account's red lines when their values change.
 
     The shadow data refreshes at most once a day, so keying on the value
     signature (rather than the 10s poll tick) yields exactly the daily drift
@@ -1178,7 +1248,7 @@ def _append_redline_history(status: dict[str, Any]) -> None:
     does not re-write the latest snapshot.
     """
     global _last_history_signature
-    red_lines = status.get("red_lines", [])
+    red_lines = account_status.get("red_lines", [])
     if not red_lines:
         return
     signature = tuple(
@@ -1186,41 +1256,48 @@ def _append_redline_history(status: dict[str, Any]) -> None:
                for rl in red_lines)
     )
     if _last_history_signature is None:
-        _last_history_signature = _latest_db_signature()
-    if signature == _last_history_signature:
+        _last_history_signature = {}
+    if account not in _last_history_signature:
+        db_sig = _latest_db_signature(account)
+        _last_history_signature[account] = (
+            f"{account}:{db_sig}" if db_sig is not None else None
+        )
+    sig_key = f"{account}:{signature}"
+    if sig_key == _last_history_signature.get(account):
         return
-    _last_history_signature = signature
-    ts = float(status.get("timestamp") or time.time())
-    source = str(status.get("source", ""))
+    _last_history_signature[account] = sig_key
+    ts = float(account_status.get("timestamp") or time.time())
     for rl in red_lines:
         value = rl.get("value")
         db.execute(
-            "INSERT INTO quant_redline_history(ts, source, name, label, level, value, detail) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO quant_redline_history(ts, source, name, label, level, value, detail, account) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 ts,
-                source,
+                str(account_status.get("source", "")),
                 str(rl.get("name", "")),
                 str(rl.get("label", "")),
                 str(rl.get("level", "")),
                 None if value is None else str(value),
                 str(rl.get("detail", "")),
+                account,
             ),
         )
 
 
-def redline_history(limit: int = 200) -> list[dict[str, Any]]:
-    """Return the latest ``limit`` persisted red-line snapshots, oldest first.
+def redline_history(limit: int = 200, account: str = "") -> list[dict[str, Any]]:
+    """Return the latest ``limit`` persisted red-line snapshots for ``account``,
+    oldest first.
 
-    A subquery first grabs the newest ``limit`` rows (by ts desc), then the outer
-    sort flips them back to ascending for trend charts. (A naive
-    ``ORDER BY ts ASC ... LIMIT ?`` would return the *oldest* rows instead.)
+    ``account`` "" returns the legacy pre-dual-track rows. A subquery first grabs
+    the newest ``limit`` rows (by ts desc), then the outer sort flips them back to
+    ascending for trend charts.
     """
     rows = db.query(
         "SELECT * FROM ("
-        "  SELECT * FROM quant_redline_history ORDER BY ts DESC, id DESC LIMIT ?"
+        "  SELECT * FROM quant_redline_history WHERE account = ? ORDER BY ts DESC, id DESC LIMIT ?"
         ") ORDER BY ts ASC, id ASC",
-        (limit,),
+        (account, limit),
     )
     for r in rows:
         v = r.get("value")
@@ -1243,6 +1320,7 @@ def start() -> None:
             return
         _started = True
 
+    _migrate_redline_history()
     _seed_default_commands()
     _start_watchdog()
     threading.Thread(target=_status_poll_loop, daemon=True, name="quant-status-poll").start()
@@ -1348,6 +1426,11 @@ def _status_poll_loop() -> None:
 
             status = get_status()
             overall = status.get("overall")
+            accounts = status.get("accounts", {})
+            for account, acc in accounts.items():
+                acc["timestamp"] = status.get("timestamp")
+                acc["source"] = acc.get("source") or status.get("source")
+                _append_redline_history(account, acc)
             red_lines = status.get("red_lines", [])
 
             criticals = {rl["name"] for rl in red_lines if rl.get("level") == "critical"}
@@ -1376,8 +1459,6 @@ def _status_poll_loop() -> None:
                     },
                 )
 
-            _append_redline_history(status)
-
             _last_overall = overall
             _last_criticals = criticals
         except Exception:  # noqa: BLE001
@@ -1386,5 +1467,13 @@ def _status_poll_loop() -> None:
 
 
 def _summarize(status: dict[str, Any]) -> str:
-    parts = [f"{rl.get('label', rl.get('name'))}: {rl.get('level')}" for rl in status.get("red_lines", [])]
-    return "; ".join(parts) or "no red lines"
+    accounts = status.get("accounts") or {}
+    parts: list[str] = []
+    for name, acc in accounts.items():
+        acc_parts = [f"{rl.get('label', rl.get('name'))}: {rl.get('level')}"
+                     for rl in acc.get("red_lines", [])]
+        parts.append(f"[{name}] " + ("; ".join(acc_parts) or "no red lines"))
+    if not parts:
+        parts = [f"{rl.get('label', rl.get('name'))}: {rl.get('level')}"
+                 for rl in status.get("red_lines", [])]
+    return " | ".join(parts) or "no red lines"

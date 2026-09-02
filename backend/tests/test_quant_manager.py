@@ -65,11 +65,11 @@ class RedlineHistoryTest(unittest.TestCase):
             ]
 
         with mock.patch.object(qm.db, "query", side_effect=fake_query):
-            rows = qm.redline_history(limit=7)
+            rows = qm.redline_history(limit=7, account="A_200W")
 
         # Subquery must fetch the newest rows (ts DESC) before re-sorting ASC.
         self.assertIn("ORDER BY ts DESC", captured["sql"])
-        self.assertEqual(captured["params"], (7,))
+        self.assertEqual(captured["params"], ("A_200W", 7))
         # Numeric strings become floats; boolean strings stay raw.
         self.assertEqual(rows[0]["value"], 123.45)
         self.assertEqual(rows[1]["value"], "True")
@@ -89,8 +89,8 @@ class AppendRedlineHistoryTest(unittest.TestCase):
         status = _status()
         with mock.patch.object(qm.db, "query", return_value=[]), \
              mock.patch.object(qm.db, "execute") as fake_exec:
-            qm._append_redline_history(status)
-            qm._append_redline_history(status)  # same signature -> skipped
+            qm._append_redline_history("A_200W", status)
+            qm._append_redline_history("A_200W", status)  # same signature -> skipped
         # Four red lines inserted exactly once.
         self.assertEqual(fake_exec.call_count, 4)
 
@@ -100,18 +100,18 @@ class AppendRedlineHistoryTest(unittest.TestCase):
         status = _status()
         with mock.patch.object(qm.db, "query", return_value=self._signature_rows(status)), \
              mock.patch.object(qm.db, "execute") as fake_exec:
-            qm._append_redline_history(status)
+            qm._append_redline_history("A_200W", status)
         self.assertEqual(fake_exec.call_count, 0)
 
     def test_changed_value_inserts(self):
         status = _status()
         with mock.patch.object(qm.db, "query", return_value=[]), \
              mock.patch.object(qm.db, "execute"):
-            qm._append_redline_history(status)
+            qm._append_redline_history("A_200W", status)
         changed = _status(value=True)  # pead_anomaly flips
         with mock.patch.object(qm.db, "query", return_value=[]), \
              mock.patch.object(qm.db, "execute") as fake_exec:
-            qm._append_redline_history(changed)
+            qm._append_redline_history("A_200W", changed)
         self.assertEqual(fake_exec.call_count, 4)
 
 

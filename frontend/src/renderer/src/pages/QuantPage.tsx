@@ -2,7 +2,6 @@ import {
   CalculatorOutlined,
   ExperimentOutlined,
   FolderOpenOutlined,
-  LineChartOutlined,
   PlayCircleOutlined,
   ReloadOutlined,
   RobotOutlined,
@@ -20,10 +19,10 @@ import {
   Form,
   Input,
   Row,
+  Segmented,
   Select,
   Space,
   Spin,
-  Statistic,
   Table,
   Tag,
   Typography,
@@ -49,8 +48,6 @@ import type {
   RedLineLevel,
   RedLineStatus,
   S7Calibration,
-  ShadowPosition,
-  ShadowStatus,
 } from '@/types'
 
 interface DetectResult {
@@ -155,114 +152,18 @@ function fmtRedValue(v: number | string | null | undefined): string {
   return s
 }
 
-function formatRatio(v: number | null | undefined): string {
-  if (v == null) return '—'
-  return `${(v * 100).toFixed(2)}%`
-}
-
-function formatMoney(v: number | null | undefined): string {
-  if (v == null) return '—'
-  return v.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-}
-
 // The kill-switch reasons about *current* drawdown-from-peak (the last point of
-// the equity curve), not the historical max-drawdown. Surface it alongside the
-// historical figure so the panel doesn't imply the book is deeper underwater
-// than it actually is.
-function currentDrawdown(shadow: ShadowStatus): number | null {
-  const curve = shadow.equity_curve ?? []
-  const last = curve[curve.length - 1]
-  if (!last || last.drawdown == null) return null
-  return Math.abs(last.drawdown)
-}
+// the equity curve), not the historical max-drawdown. The dual-track panel
+// (DualShadowPanel) surfaces the historical figure directly.
 
 function isErrorLine(line: string): boolean {
   return /(error|trace|错误)/i.test(line)
 }
 
 // --------------------------------------------------------------------------- #
-// ECharts option builders
+// ECharts option builders (calibration charts; the dual-track shadow charts
+// live in DualShadowPanel)
 // --------------------------------------------------------------------------- #
-function buildEquityOption(shadow: ShadowStatus): EChartsOption {
-  const eq = shadow.equity_curve ?? []
-  const bench = shadow.benchmark ?? []
-  const series: unknown[] = [
-    {
-      name: '组合净值',
-      type: 'line',
-      showSymbol: false,
-      smooth: true,
-      data: eq.map((p) => [p.date, p.equity]),
-      lineStyle: { width: 2 },
-    },
-  ]
-  if (bench.length) {
-    series.push({
-      name: 'HS300 基准',
-      type: 'line',
-      showSymbol: false,
-      smooth: true,
-      data: bench.map((p) => [p.date, p.equity]),
-      lineStyle: { width: 1.5, type: 'dashed' },
-    })
-  }
-  return {
-    tooltip: { trigger: 'axis' },
-    legend: { bottom: 0 },
-    grid: { left: 64, right: 20, top: 20, bottom: 44 },
-    xAxis: { type: 'time' },
-    yAxis: { type: 'value', scale: true, name: '净值' },
-    series,
-  } as EChartsOption
-}
-
-function buildDrawdownExcessOption(shadow: ShadowStatus): EChartsOption {
-  const eq = shadow.equity_curve ?? []
-  const bench = shadow.benchmark ?? []
-  const excess = shadow.excess_curve ?? []
-  const series: unknown[] = []
-  if (eq.length) {
-    series.push({
-      name: '组合回撤',
-      type: 'line',
-      showSymbol: false,
-      data: eq.map((p) => [p.date, +(p.drawdown * 100).toFixed(2)]),
-      areaStyle: { opacity: 0.15 },
-      yAxisIndex: 0,
-    })
-  }
-  if (bench.length) {
-    series.push({
-      name: '基准回撤',
-      type: 'line',
-      showSymbol: false,
-      data: bench.map((p) => [p.date, +(p.drawdown * 100).toFixed(2)]),
-      lineStyle: { type: 'dashed' },
-      yAxisIndex: 0,
-    })
-  }
-  if (excess.length) {
-    series.push({
-      name: '超额收益',
-      type: 'line',
-      showSymbol: false,
-      data: excess.map((p) => [p.date, +(p.excess * 100).toFixed(2)]),
-      yAxisIndex: 1,
-    })
-  }
-  return {
-    tooltip: { trigger: 'axis', valueFormatter: (v: unknown) => `${v}%` },
-    legend: { bottom: 0 },
-    grid: { left: 52, right: 52, top: 20, bottom: 44 },
-    xAxis: { type: 'time' },
-    yAxis: [
-      { type: 'value', name: '回撤%', axisLabel: { formatter: '{value}%' } },
-      { type: 'value', name: '超额%', axisLabel: { formatter: '{value}%' }, splitLine: { show: false } },
-    ],
-    series,
-  } as EChartsOption
-}
-
 function buildAmplitudeOption(cal: S7Calibration): EChartsOption {
   const results = cal.amplitude?.results ?? []
   if (!results.length) return {} as EChartsOption
@@ -444,68 +345,6 @@ function CalibrationOverview({ cal }: { cal: S7Calibration }): JSX.Element {
   )
 }
 
-const positionColumns: TableColumnsType<ShadowPosition> = [
-  { title: '标的', dataIndex: 'symbol', key: 'symbol', className: 'mono' },
-  {
-    title: '股数',
-    dataIndex: 'shares',
-    key: 'shares',
-    align: 'right',
-    render: (v: number) => (v == null ? '—' : v.toLocaleString('zh-CN')),
-  },
-  {
-    title: '权重',
-    dataIndex: 'weight',
-    key: 'weight',
-    align: 'right',
-    render: (v: number) => formatRatio(v),
-  },
-  {
-    title: '方向',
-    dataIndex: 'side',
-    key: 'side',
-    width: 80,
-    render: (v: string) => <Tag color={v === 'short' ? 'orange' : 'green'}>{v ?? '—'}</Tag>,
-  },
-  {
-    title: '现价',
-    dataIndex: 'last_price',
-    key: 'last_price',
-    align: 'right',
-    render: (v: number | null) => (v == null ? '—' : v.toFixed(2)),
-  },
-  {
-    title: '成本',
-    dataIndex: 'entry_price',
-    key: 'entry_price',
-    align: 'right',
-    render: (v: number | null) => (v == null ? '—' : v.toFixed(2)),
-  },
-  {
-    title: '盈亏',
-    dataIndex: 'pnl',
-    key: 'pnl',
-    align: 'right',
-    render: (v: number | null) =>
-      v == null ? (
-        '—'
-      ) : (
-        <span style={{ color: v >= 0 ? '#ff4d4f' : '#52c41a' }}>
-          {v >= 0 ? '+' : ''}
-          {formatMoney(v)}
-        </span>
-      ),
-  },
-  {
-    title: '盈亏%',
-    dataIndex: 'pnl_pct',
-    key: 'pnl_pct',
-    align: 'right',
-    render: (v: number | null) =>
-      v == null ? '—' : <span style={{ color: v >= 0 ? '#ff4d4f' : '#52c41a' }}>{formatRatio(v)}</span>,
-  },
-]
-
 const projectColumns: TableColumnsType<QuantProject> = [
   { title: '名称', dataIndex: 'name', key: 'name' },
   {
@@ -590,21 +429,21 @@ export default function QuantPage(): JSX.Element {
   const [configLoading, setConfigLoading] = useState(false)
   const [configSaving, setConfigSaving] = useState(false)
 
-  const [shadow, setShadow] = useState<ShadowStatus | null>(null)
-  const [shadowLoading, setShadowLoading] = useState(true)
-  const [shadowError, setShadowError] = useState<string | null>(null)
+  const [shadowPanelKey, setShadowPanelKey] = useState(0)
   const [calibration, setCalibration] = useState<S7Calibration | null>(null)
   const [calibrationLoading, setCalibrationLoading] = useState(true)
   const [calibrationError, setCalibrationError] = useState<string | null>(null)
   const [schedule, setSchedule] = useState<QuantScheduleStatus | null>(null)
-  const [autopilot, setAutopilot] = useState<AutopilotState | null>(null)
+  const [autopilotStates, setAutopilotStates] = useState<Record<string, AutopilotState>>({})
   const [autopilotLoading, setAutopilotLoading] = useState(true)
   const [autopilotError, setAutopilotError] = useState<string | null>(null)
   const [runningShadow, setRunningShadow] = useState(false)
   const [runningCalibration, setRunningCalibration] = useState(false)
   const [runningAutopilot, setRunningAutopilot] = useState(false)
+  const [runningWeekly, setRunningWeekly] = useState(false)
   const [redLineHistory, setRedLineHistory] = useState<RedLineHistoryPoint[]>([])
   const [historyLoading, setHistoryLoading] = useState(true)
+  const [historyAccount, setHistoryAccount] = useState<string>('')
 
   const [form] = Form.useForm<{ root_path: string; name: string }>()
   const logRef = useRef<HTMLPreElement>(null)
@@ -664,19 +503,6 @@ export default function QuantPage(): JSX.Element {
     }
   }, [])
 
-  const refreshShadow = useCallback(async (): Promise<void> => {
-    try {
-      const { data } = await api.get<ShadowStatus | null>('/quant/shadow')
-      setShadow(data ?? null)
-      setShadowError(null)
-    } catch (err) {
-      setShadow(null)
-      setShadowError(describeError(err))
-    } finally {
-      setShadowLoading(false)
-    }
-  }, [])
-
   const refreshCalibration = useCallback(async (): Promise<void> => {
     try {
       const { data } = await api.get<S7Calibration | null>('/quant/calibration')
@@ -701,11 +527,11 @@ export default function QuantPage(): JSX.Element {
 
   const refreshAutopilot = useCallback(async (): Promise<void> => {
     try {
-      const { data } = await api.get<AutopilotState | null>('/quant/autopilot')
-      setAutopilot(data ?? null)
+      const { data } = await api.get<Record<string, AutopilotState>>('/quant/autopilot')
+      setAutopilotStates(data ?? {})
       setAutopilotError(null)
     } catch (err) {
-      setAutopilot(null)
+      setAutopilotStates({})
       setAutopilotError(describeError(err))
     } finally {
       setAutopilotLoading(false)
@@ -715,7 +541,7 @@ export default function QuantPage(): JSX.Element {
   const refreshHistory = useCallback(async (): Promise<void> => {
     try {
       const { data } = await api.get<RedLineHistoryPoint[]>('/quant/redline-history', {
-        params: { limit: 300 },
+        params: { limit: 300, account: historyAccount },
       })
       setRedLineHistory(Array.isArray(data) ? data : [])
     } catch {
@@ -723,7 +549,7 @@ export default function QuantPage(): JSX.Element {
     } finally {
       setHistoryLoading(false)
     }
-  }, [])
+  }, [historyAccount])
 
   useEffect(() => {
     void refreshStatus()
@@ -731,12 +557,20 @@ export default function QuantPage(): JSX.Element {
     void refreshProcesses()
     void refreshCommands()
     void refreshLogs()
-    void refreshShadow()
     void refreshCalibration()
     void refreshSchedule()
     void refreshHistory()
     void refreshAutopilot()
-  }, [refreshStatus, refreshProjects, refreshProcesses, refreshCommands, refreshLogs, refreshShadow, refreshCalibration, refreshSchedule, refreshHistory, refreshAutopilot])
+  }, [refreshStatus, refreshProjects, refreshProcesses, refreshCommands, refreshLogs, refreshCalibration, refreshSchedule, refreshHistory, refreshAutopilot])
+
+  // When the dual-track accounts first load, default the history view to the
+  // first account so the heatmap is not empty.
+  useEffect(() => {
+    const names = Object.keys(status?.accounts ?? {})
+    if (historyAccount === '' && names.length > 0) {
+      setHistoryAccount(names[0])
+    }
+  }, [status, historyAccount])
 
   const onRedLineAlert = useCallback(() => {
     void refreshStatus()
@@ -764,32 +598,50 @@ export default function QuantPage(): JSX.Element {
   }, [])
 
   const onQuantShadowRan = useCallback(() => {
+    setRunningShadow(false)
     void refreshStatus()
-    void refreshShadow()
     void refreshSchedule()
     void refreshHistory()
-  }, [refreshStatus, refreshShadow, refreshSchedule, refreshHistory])
+    setShadowPanelKey((k) => k + 1)
+  }, [refreshStatus, refreshSchedule, refreshHistory])
 
   const onQuantCalibrated = useCallback(() => {
+    setRunningCalibration(false)
     void refreshCalibration()
     void refreshSchedule()
   }, [refreshCalibration, refreshSchedule])
 
   const onQuantAutopilotRan = useCallback(() => {
+    setRunningAutopilot(false)
     void refreshStatus()
     void refreshAutopilot()
-    void refreshShadow()
     void refreshCalibration()
     void refreshSchedule()
     void refreshHistory()
-  }, [refreshStatus, refreshAutopilot, refreshShadow, refreshCalibration, refreshSchedule, refreshHistory])
+    setShadowPanelKey((k) => k + 1)
+  }, [refreshStatus, refreshAutopilot, refreshCalibration, refreshSchedule, refreshHistory])
+
+  const onQuantWeeklyRan = useCallback(() => {
+    setRunningWeekly(false)
+    void refreshSchedule()
+  }, [refreshSchedule])
+
+  const onQuantShadowStarted = useCallback(() => setRunningShadow(true), [])
+  const onQuantAutopilotStarted = useCallback(() => setRunningAutopilot(true), [])
+  const onQuantCalibrationStarted = useCallback(() => setRunningCalibration(true), [])
+  const onQuantWeeklyStarted = useCallback(() => setRunningWeekly(true), [])
 
   useWsEvent('red_line_alert', onRedLineAlert)
   useWsEvent('log_line', onLogLine)
   useWsEvent('quant_processes', onQuantProcesses)
   useWsEvent('quant_shadow_ran', onQuantShadowRan)
+  useWsEvent('quant_shadow_started', onQuantShadowStarted)
   useWsEvent('quant_calibrated', onQuantCalibrated)
+  useWsEvent('quant_calibration_started', onQuantCalibrationStarted)
   useWsEvent('quant_autopilot_ran', onQuantAutopilotRan)
+  useWsEvent('quant_autopilot_started', onQuantAutopilotStarted)
+  useWsEvent('quant_weekly_ran', onQuantWeeklyRan)
+  useWsEvent('quant_weekly_started', onQuantWeeklyStarted)
 
   useEffect(() => {
     const el = logRef.current
@@ -960,7 +812,7 @@ export default function QuantPage(): JSX.Element {
 
   const handleRunAutopilot = async (): Promise<void> => {
     const confirmationId = await confirmOperation('run_quant_autopilot', '运行自动闭环', {
-      note: '在 FQA 项目根目录执行 python cli.py autopilot：推进影子账本 → 风险闸门(kill-switch) → 周期回校/因子衰减监控 → 持久化档位',
+      note: '在 FQA 项目根目录执行 python cli.py autopilot：逐账户推进影子账本 → 逐账户风险闸门(kill-switch) → 持久化各账户档位',
     })
     if (!confirmationId) return
     setRunningAutopilot(true)
@@ -971,6 +823,22 @@ export default function QuantPage(): JSX.Element {
       notification.error({ message: '启动失败', description: describeError(err) })
     } finally {
       setRunningAutopilot(false)
+    }
+  }
+
+  const handleRunWeekly = async (): Promise<void> => {
+    const confirmationId = await confirmOperation('run_quant_weekly', '运行周度闭环', {
+      note: '在 FQA 项目根目录执行 python cli.py weekly：纳入当周数据重训 LightGBM，尾部 Sharpe 改善才 promote 新工件',
+    })
+    if (!confirmationId) return
+    setRunningWeekly(true)
+    try {
+      await api.post('/quant/weekly/run', { confirmation_id: confirmationId })
+      notification.success({ message: '周度闭环已启动', description: '后台运行中（重训 + promote 闸门），完成后邮件通知' })
+    } catch (err) {
+      notification.error({ message: '启动失败', description: describeError(err) })
+    } finally {
+      setRunningWeekly(false)
     }
   }
 
@@ -1020,7 +888,12 @@ export default function QuantPage(): JSX.Element {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <DualShadowPanel />
+      <DualShadowPanel
+        key={shadowPanelKey}
+        schedule={schedule}
+        runningShadow={runningShadow}
+        onRunShadow={() => void handleRunShadow()}
+      />
       <Card
         title="红线仪表盘"
         extra={
@@ -1052,23 +925,40 @@ export default function QuantPage(): JSX.Element {
                 {LEVEL_LABEL[status.overall] ?? status.overall}
               </Tag>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                上次运行：{status.last_run ? formatIso(status.last_run) : formatTime(status.timestamp)}
+                上次运行：{formatTime(status.timestamp)} · 账户数 {Object.keys(status.accounts ?? {}).length}
               </Typography.Text>
-              {status.data_freshness_days != null ? (
-                <Tag
-                  color={status.data_freshness_days <= 1 ? 'green' : status.data_freshness_days <= 3 ? 'orange' : 'red'}
-                >
-                  数据新鲜度 {status.data_freshness_days} 天
-                </Tag>
-              ) : null}
             </Space>
-            <Row gutter={[12, 12]}>
-              {(status.red_lines ?? []).map((rl) => (
-                <Col key={rl.name} xs={24} sm={12} md={8} lg={6}>
-                  <RedLineCard redLine={rl} />
-                </Col>
-              ))}
-            </Row>
+            {Object.entries(status.accounts ?? {}).map(([name, acc]) => (
+              <div key={name} style={{ width: '100%' }}>
+                <Space size={8} style={{ marginBottom: 8 }}>
+                  <Typography.Text strong>{name}</Typography.Text>
+                  <Tag color={LEVEL_COLOR[acc.overall] ?? LEVEL_COLOR.ok}>
+                    {LEVEL_LABEL[acc.overall] ?? acc.overall}
+                  </Tag>
+                  {acc.data_freshness_days != null ? (
+                    <Tag
+                      color={
+                        acc.data_freshness_days <= 1 ? 'green' : acc.data_freshness_days <= 3 ? 'orange' : 'red'
+                      }
+                    >
+                      数据新鲜度 {acc.data_freshness_days} 天
+                    </Tag>
+                  ) : null}
+                  {acc.last_trading_date ? (
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      截至 {formatIso(acc.last_trading_date)}
+                    </Typography.Text>
+                  ) : null}
+                </Space>
+                <Row gutter={[12, 12]}>
+                  {(acc.red_lines ?? []).map((rl) => (
+                    <Col key={rl.name} xs={24} sm={12} md={8} lg={6}>
+                      <RedLineCard redLine={rl} />
+                    </Col>
+                  ))}
+                </Row>
+              </div>
+            ))}
           </Space>
         )}
       </Card>
@@ -1076,15 +966,26 @@ export default function QuantPage(): JSX.Element {
       <Card
         title="红线历史"
         extra={
-          <Button size="small" icon={<ReloadOutlined />} onClick={() => void refreshHistory()}>
-            刷新
-          </Button>
+          <Space size={8}>
+            <Segmented<string>
+              size="small"
+              value={historyAccount}
+              onChange={(v) => {
+                setHistoryAccount(String(v))
+                setHistoryLoading(true)
+              }}
+              options={Object.keys(status?.accounts ?? {}).map((n) => ({ label: n, value: n }))}
+            />
+            <Button size="small" icon={<ReloadOutlined />} onClick={() => void refreshHistory()}>
+              刷新
+            </Button>
+          </Space>
         }
       >
         {historyLoading ? (
           <Spin />
         ) : redLineHistory.length === 0 ? (
-          <Empty description="暂无红线历史 — 每日影子运行后累积" />
+          <Empty description={`暂无${historyAccount ? ` ${historyAccount} ` : ' '}红线历史 — 每日影子运行后累积`} />
         ) : (
           <EChart option={buildRedLineHistoryOption(redLineHistory)} height={320} />
         )}
@@ -1095,7 +996,8 @@ export default function QuantPage(): JSX.Element {
         extra={
           <Space size={8}>
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              {schedule?.autopilot_enabled ? '每日自动 · 影子→风险闸门→回校/监控' : '已禁用（回退为影子）'}
+              {schedule?.autopilot_enabled ? '每日自动 · 影子→逐账户风险闸门' : '已禁用（回退为影子）'}
+              {schedule?.weekly_time ? ` · 周度周日 ${schedule.weekly_time}` : ''}
             </Typography.Text>
             <Button
               size="small"
@@ -1105,6 +1007,14 @@ export default function QuantPage(): JSX.Element {
               onClick={() => void handleRunAutopilot()}
             >
               运行闭环
+            </Button>
+            <Button
+              size="small"
+              icon={<CalculatorOutlined />}
+              loading={runningWeekly}
+              onClick={() => void handleRunWeekly()}
+            >
+              周度闭环
             </Button>
             <Button size="small" icon={<ReloadOutlined />} onClick={() => void refreshAutopilot()}>
               刷新
@@ -1116,177 +1026,52 @@ export default function QuantPage(): JSX.Element {
           <Spin />
         ) : autopilotError != null ? (
           <Alert type="error" showIcon message="自动闭环输出损坏" description={autopilotError} />
-        ) : autopilot == null ? (
-          <Empty description="尚未运行自动闭环 — 点击「运行闭环」驱动影子→风险闸门→回校/监控全链路" />
+        ) : Object.keys(autopilotStates).length === 0 ? (
+          <Empty description="尚未运行自动闭环 — 点击「运行闭环」驱动影子→逐账户风险闸门全链路" />
         ) : (
           <Space direction="vertical" style={{ width: '100%' }} size={12}>
-            <Space size={12} wrap>
-              <Typography.Text>当前档位：</Typography.Text>
-              <Tag color={AUTOPILOT_MODE_COLOR[autopilot.mode] ?? '#8a93a6'}>
-                {AUTOPILOT_MODE_LABEL[autopilot.mode] ?? autopilot.mode}
-              </Tag>
-              <Tag>总敞口 ×{autopilot.gross_scale ?? 1}</Tag>
-              {autopilot.factor_decayed ? (
-                <Tag color="warning">因子衰减</Tag>
-              ) : (
-                <Tag color="default">因子健康</Tag>
-              )}
-            </Space>
-            {autopilot.reason ? (
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                档位原因：{autopilot.reason}
-              </Typography.Text>
-            ) : null}
-            {autopilot.decay_detail && Object.keys(autopilot.decay_detail).length > 0 ? (
-              <Space direction="vertical" size={2}>
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  因子衰减明细：
-                </Typography.Text>
-                {Object.entries(autopilot.decay_detail).map(([formula, d]) => (
-                  <Typography.Text
-                    key={formula}
-                    type={d.decayed ? 'danger' : 'secondary'}
-                    style={{ fontSize: 12 }}
-                  >
-                    {formula}: ICIR {d.recent_icir != null ? d.recent_icir.toFixed(3) : '—'}（
-                    {d.decayed ? '衰减' : '正常'}）
-                  </Typography.Text>
-                ))}
-              </Space>
-            ) : null}
-            <Descriptions size="small" column={{ xs: 2, sm: 3, md: 5 }} bordered>
-              <Descriptions.Item label="进入档位">{formatIso(autopilot.since_date)}</Descriptions.Item>
-              <Descriptions.Item label="上次评估">{formatIso(autopilot.last_evaluated)}</Descriptions.Item>
-              <Descriptions.Item label="上次回校">{formatIso(autopilot.last_calibrate)}</Descriptions.Item>
-              <Descriptions.Item label="上次监控">{formatIso(autopilot.last_monitor)}</Descriptions.Item>
-              <Descriptions.Item label="上次重挖">{formatIso(autopilot.last_remine)}</Descriptions.Item>
-              <Descriptions.Item label="重挖状态">{String(autopilot.extra?.remine ?? '未运行')}</Descriptions.Item>
-            </Descriptions>
-          </Space>
-        )}
-      </Card>
-
-      <Card
-        title="影子模式（长期测试）"
-        extra={
-          <Space size={8}>
-            {schedule ? (
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                工作日 {schedule.shadow_daily_time} · 校准周六 {schedule.calibrate_time}
-                {schedule.scheduler_running ? '' : '（未启动）'}
-              </Typography.Text>
-            ) : null}
-            <Button
-              size="small"
-              type="primary"
-              icon={<LineChartOutlined />}
-              loading={runningShadow}
-              onClick={() => void handleRunShadow()}
-            >
-              立即运行
-            </Button>
-            <Button size="small" icon={<ReloadOutlined />} onClick={() => void refreshShadow()}>
-              刷新
-            </Button>
-          </Space>
-        }
-      >
-        {shadowLoading ? (
-          <Spin />
-        ) : shadowError != null ? (
-          <Alert type="error" showIcon message="影子模式输出损坏" description={shadowError} />
-        ) : shadow == null ? (
-          <Empty description="尚未运行影子模式 — 点击「立即运行」逐日推进影子账本" />
-        ) : (
-          <Space direction="vertical" style={{ width: '100%' }} size={12}>
-            <Row gutter={[12, 12]}>
-              <Col xs={12} sm={8} md={4}>
-                <Statistic title="最新净值" value={shadow.equity?.latest ?? 0} precision={2} />
-              </Col>
-              <Col xs={12} sm={8} md={4}>
-                <Statistic title="累计收益" value={formatRatio(shadow.equity?.total_return)} />
-              </Col>
-              <Col xs={12} sm={8} md={4}>
-                <Statistic title="Sharpe" value={shadow.equity?.sharpe ?? 0} precision={2} />
-              </Col>
-              <Col xs={12} sm={8} md={4}>
-                <Statistic title="最大回撤(历史)" value={formatRatio(shadow.equity?.max_drawdown)} />
-              </Col>
-              <Col xs={12} sm={8} md={4}>
-                <Statistic title="当前回撤(距峰值)" value={formatRatio(currentDrawdown(shadow))} />
-              </Col>
-              <Col xs={12} sm={8} md={4}>
-                <Statistic title="数据新鲜度" value={shadow.data_freshness_days ?? 0} suffix="天" />
-              </Col>
-              <Col xs={12} sm={8} md={4}>
-                <Statistic title="成交笔数" value={shadow.equity?.n_fills ?? 0} />
-              </Col>
-              <Col xs={12} sm={8} md={4}>
-                <Statistic
-                  title="期末现金"
-                  value={shadow.equity?.final_cash ?? 0}
-                  precision={2}
-                  formatter={(v) => formatMoney(Number(v))}
-                />
-              </Col>
-              <Col xs={12} sm={8} md={4}>
-                <Statistic title="年化收益" value={formatRatio(shadow.equity?.annualized_return)} />
-              </Col>
-              <Col xs={12} sm={8} md={4}>
-                <Statistic title="交易日" value={shadow.equity?.n_days ?? 0} suffix="天" />
-              </Col>
-              <Col xs={12} sm={8} md={4}>
-                <Statistic
-                  title="累计成本"
-                  value={shadow.equity?.total_commission ?? 0}
-                  precision={2}
-                  formatter={(v) => formatMoney(Number(v))}
-                />
-              </Col>
-            </Row>
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              观察日期：{formatIso(shadow.last_trading_date ?? shadow.as_of)} · 上次运行：{formatIso(shadow.last_run)}
-            </Typography.Text>
-            {shadow.equity_curve?.length ? (
-              <Row gutter={[12, 12]}>
-                <Col xs={24} lg={12}>
-                  <Card size="small" title="净值 vs HS300 基准">
-                    <EChart option={buildEquityOption(shadow)} height={260} />
-                  </Card>
-                </Col>
-                <Col xs={24} lg={12}>
-                  <Card size="small" title="回撤 + 超额收益">
-                    <EChart option={buildDrawdownExcessOption(shadow)} height={260} />
-                  </Card>
-                </Col>
-              </Row>
-            ) : null}
-            <Descriptions size="small" column={{ xs: 2, sm: 3, md: 5 }} bordered>
-              <Descriptions.Item label="PEAD 幅度">{shadow.s7_params?.amplitude ?? '—'}</Descriptions.Item>
-              <Descriptions.Item label="舆情 z 阈值">{shadow.s7_params?.zscore_threshold ?? '—'}</Descriptions.Item>
-              <Descriptions.Item label="冻结天数">{shadow.s7_params?.freeze_days ?? '—'}</Descriptions.Item>
-              <Descriptions.Item label="冲击 bps">{shadow.s7_params?.slippage_bps ?? '—'}</Descriptions.Item>
-              <Descriptions.Item label="佣金 bps">{shadow.s7_params?.commission_bps ?? '—'}</Descriptions.Item>
-              <Descriptions.Item label="仓位 cut">{shadow.s7_params?.position_cut ?? '—'}</Descriptions.Item>
-              <Descriptions.Item label="最低佣金">{shadow.s7_params?.min_commission ?? '—'}</Descriptions.Item>
-              <Descriptions.Item label="印花税 bps">{shadow.s7_params?.stamp_tax_sell_bps ?? '—'}</Descriptions.Item>
-              <Descriptions.Item label="过户费 bps">{shadow.s7_params?.transfer_fee_bps ?? '—'}</Descriptions.Item>
-              <Descriptions.Item label="Beta 中性化">
-                {shadow.strategy?.beta_neutralize ? `开（${shadow.strategy.beta_lookback ?? '—'}d）` : '关'}
-              </Descriptions.Item>
-              <Descriptions.Item label="调仓周期">
-                {shadow.strategy?.rebalance_days != null ? `${shadow.strategy.rebalance_days} 天` : '—'}
-              </Descriptions.Item>
-            </Descriptions>
-            <Typography.Text strong>当日 TopN 目标持仓</Typography.Text>
-            <Table<ShadowPosition>
-              rowKey={(r) => r.symbol}
-              columns={positionColumns}
-              dataSource={shadow.positions ?? []}
-              size="small"
-              pagination={false}
-              scroll={{ y: 240 }}
-            />
+            {Object.entries(autopilotStates).map(([name, st]) => (
+              <div key={name} style={{ width: '100%' }}>
+                <Space size={12} wrap style={{ marginBottom: 8 }}>
+                  <Typography.Text strong>{name}</Typography.Text>
+                  <Tag color={AUTOPILOT_MODE_COLOR[st.mode] ?? '#8a93a6'}>
+                    {AUTOPILOT_MODE_LABEL[st.mode] ?? st.mode}
+                  </Tag>
+                  <Tag>总敞口 ×{st.gross_scale ?? 1}</Tag>
+                  {st.factor_decayed ? <Tag color="warning">因子衰减</Tag> : null}
+                  {st.reason ? (
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      档位原因：{st.reason}
+                    </Typography.Text>
+                  ) : null}
+                </Space>
+                {st.decay_detail && Object.keys(st.decay_detail).length > 0 ? (
+                  <Space direction="vertical" size={2}>
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      因子衰减明细：
+                    </Typography.Text>
+                    {Object.entries(st.decay_detail).map(([formula, d]) => (
+                      <Typography.Text
+                        key={formula}
+                        type={d.decayed ? 'danger' : 'secondary'}
+                        style={{ fontSize: 12 }}
+                      >
+                        {formula}: ICIR {d.recent_icir != null ? d.recent_icir.toFixed(3) : '—'}（
+                        {d.decayed ? '衰减' : '正常'}）
+                      </Typography.Text>
+                    ))}
+                  </Space>
+                ) : null}
+                <Descriptions size="small" column={{ xs: 2, sm: 3, md: 6 }} bordered>
+                  <Descriptions.Item label="进入档位">{formatIso(st.since_date)}</Descriptions.Item>
+                  <Descriptions.Item label="上次评估">{formatIso(st.last_evaluated)}</Descriptions.Item>
+                  <Descriptions.Item label="上次回校">{formatIso(st.last_calibrate)}</Descriptions.Item>
+                  <Descriptions.Item label="上次监控">{formatIso(st.last_monitor)}</Descriptions.Item>
+                  <Descriptions.Item label="上次重挖">{formatIso(st.last_remine)}</Descriptions.Item>
+                  <Descriptions.Item label="模型迭代">{String(st.extra?.model_update ?? '—')}</Descriptions.Item>
+                </Descriptions>
+              </div>
+            ))}
           </Space>
         )}
       </Card>
@@ -1560,18 +1345,31 @@ function normalizeLogs(data: unknown): string[] {
 
 function buildStatusReport(status: RedLineStatus): string {
   const lines: string[] = []
-  lines.push('# 量化红线报告')
+  lines.push('# 量化红线报告（双资金轨）')
   lines.push('')
   lines.push(`- 总体状态：${LEVEL_LABEL[status.overall] ?? status.overall}`)
   lines.push(`- 时间：${formatTime(status.timestamp)}`)
-  lines.push('')
-  lines.push('## 红线指标')
-  for (const rl of status.red_lines ?? []) {
-    const label = rl.label ?? rl.name
-    const level = LEVEL_LABEL[rl.level] ?? rl.level
-    const value = rl.value == null ? '—' : String(rl.value)
-    const detail = rl.detail ? ` — ${rl.detail}` : ''
-    lines.push(`- ${label}：${level}（${value}）${detail}`)
+  for (const [name, acc] of Object.entries(status.accounts ?? {})) {
+    lines.push('')
+    lines.push(`## 账户 ${name} — ${LEVEL_LABEL[acc.overall] ?? acc.overall}`)
+    for (const rl of acc.red_lines ?? []) {
+      const label = rl.label ?? rl.name
+      const level = LEVEL_LABEL[rl.level] ?? rl.level
+      const value = rl.value == null ? '—' : String(rl.value)
+      const detail = rl.detail ? ` — ${rl.detail}` : ''
+      lines.push(`- ${label}：${level}（${value}）${detail}`)
+    }
+  }
+  if (Object.keys(status.accounts ?? {}).length === 0) {
+    lines.push('')
+    lines.push('## 红线指标')
+    for (const rl of status.red_lines ?? []) {
+      const label = rl.label ?? rl.name
+      const level = LEVEL_LABEL[rl.level] ?? rl.level
+      const value = rl.value == null ? '—' : String(rl.value)
+      const detail = rl.detail ? ` — ${rl.detail}` : ''
+      lines.push(`- ${label}：${level}（${value}）${detail}`)
+    }
   }
   return lines.join('\n')
 }
