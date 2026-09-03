@@ -234,7 +234,15 @@ function AccountTab({ account }: { account: AccountStatus }): JSX.Element {
             <Tag color={cfg.notional_floor > 0 ? 'gold' : 'default'}>
               治理 {cfg.notional_floor > 0 ? `下限${cfg.notional_floor}元/带宽${(cfg.band_frac * 100).toFixed(1)}%` : '无'}
             </Tag>
-            <Tag color="magenta">信号 ML·{cfg.ml_artifacts?.join(',') ?? '—'}</Tag>
+            {cfg.alpha_source === 'pullback' ? (
+              <Tag color="volcano">
+                信号 回撤策略·{cfg.pullback && (cfg.pullback as { rank_source?: string }).rank_source === 'ml'
+                  ? 'ML 扫描'
+                  : '动量扫描'}
+              </Tag>
+            ) : (
+              <Tag color="magenta">信号 ML·{cfg.ml_artifacts?.join(',') ?? '—'}</Tag>
+            )}
           </>
         ) : null}
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>

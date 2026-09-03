@@ -283,6 +283,7 @@ export interface ShadowAccountConfig {
   rebalance_days: number
   notional_floor: number
   band_frac: number
+  pullback?: Record<string, unknown>
 }
 
 export interface RedLineHistoryPoint {
