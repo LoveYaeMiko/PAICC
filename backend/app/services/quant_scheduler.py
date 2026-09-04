@@ -44,9 +44,17 @@ def start_live_trader() -> dict[str, Any]:
 
     ``python cli.py live`` polls the latest minute print and executes D-track
     stop breaches at the actual moment; it self-exits at 15:10 and a pid lock
-    makes double-starts no-ops.
+    makes double-starts no-ops. The PIT store is ensured FIRST — ``cli.py live``
+    hard-exits on an unreachable PIT DB, so this job launches Docker Desktop
+    itself instead of silently missing the whole session (2026-09-04 check:
+    this was the one scheduled task without PIT self-heal).
     """
     try:
+        pit_fail = _ensure_pit_db_or_fail()
+        if pit_fail is not None:
+            err = str(pit_fail.get("stderr", ""))[-200:]
+            db.log_operation("quant_live_start", {}, {"ok": False, "error": err})
+            return {"ok": False, "error": err}
         proc = quant_manager.run_command(command="python cli.py live")
         db.log_operation("quant_live_start", {}, {"pid": proc.get("pid")})
         return {"ok": True, "pid": proc.get("pid")}
