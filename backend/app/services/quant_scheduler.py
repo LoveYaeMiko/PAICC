@@ -37,6 +37,7 @@ WEEKLY_JOB_ID = "quant_weekly_cycle"
 DEPTH_JOB_ID = "quant_depth_snapshot"
 LIVE_JOB_ID = "quant_live_start"
 INTRA_JOB_ID = "quant_intraday_refresh"
+CHALLENGER_JOB_ID = "quant_d_challenger"
 
 
 def start_live_trader() -> dict[str, Any]:
@@ -343,59 +344,86 @@ def run_autopilot_daily() -> dict[str, Any]:
 
 
 def run_weekly_cycle() -> dict[str, Any]:
-    """Weekly auto closed-loop: fold the week's data into history and re-optimise.
+    """Monthly (first Sunday) D-track model self-optimization cycle.
 
-    Runs ``python cli.py weekly`` in the FQA root — retrains the LightGBM with
-    data through the latest bar and promotes the new artifact only if its
-    trailing Sharpe improves on the incumbent. Emails the weekly result.
+    Replaces the old weekly retrain: ``cli.py dcycle decide`` runs the forward
+    promotion gate (challenger vs the REAL D ledger over the trailing OOS
+    window), then ``cli.py dcycle refit`` folds the latest data into a rolling
+    refit for the NEXT month's challenger. Non-first Sundays are a no-op so the
+    weekly slot stays calendar-anchored.
     """
     global _last_weekly_run
     result: dict[str, Any] = {"ok": False}
     ws.publish("quant_weekly_started", {"ts": datetime.now().isoformat(timespec="seconds")})
     try:
-        proc = _ensure_pit_db_or_fail() or quant_manager.run_project_command("python cli.py weekly", timeout=7200)
-        ok = proc.get("returncode") == 0
-        weekly_json = _read_report("outputs/weekly.json")
+        if not settings.get_bool("quant_d_cycle_enabled", False):
+            result = {"ok": True, "skipped": "D 轨模型自优化循环未启用（quant_d_cycle_enabled=false）"}
+            ws.publish("quant_weekly_ran", result)
+            _last_weekly_run = result
+            return result
+        now = datetime.now()
+        if now.day > 7:
+            result = {"ok": True, "skipped": "非本月第一个周日 — 跳过月度模型循环"}
+            ws.publish("quant_weekly_ran", result)
+            _last_weekly_run = result
+            return result
+
+        proc = _ensure_pit_db_or_fail() or quant_manager.run_project_command(
+            "python cli.py dcycle decide", timeout=3600
+        )
+        ok_decide = proc.get("returncode") == 0
+        proc2 = _ensure_pit_db_or_fail() or quant_manager.run_project_command(
+            "python cli.py dcycle refit", timeout=7200
+        )
+        ok_refit = proc2.get("returncode") == 0
+        ok = ok_decide and ok_refit
+
         import json as _json
 
-        weekly: dict[str, Any] = {}
-        try:
-            weekly = _json.loads(weekly_json) if weekly_json else {}
-        except ValueError:
-            weekly = {}
+        cycle: dict[str, Any] = {}
+        cycle_json = _read_report("outputs/d_model_cycle.json")
+        if cycle_json:
+            try:
+                loaded = _json.loads(cycle_json)
+                hist = loaded.get("history", []) if isinstance(loaded, dict) else []
+                if hist:
+                    cycle = hist[-1]
+            except ValueError:
+                cycle = {}
 
         email: dict[str, Any] = {"ok": False, "error": "auto-email disabled"}
         if settings.get_bool("quant_shadow_auto_email", True):
             if ok:
                 subject = (
-                    f"FQA 周度闭环 — {weekly.get('date')} "
-                    f"{'promoted' if weekly.get('promoted') else 'kept'} "
-                    f"(sharpe {weekly.get('new_sharpe', 0):.3f})"
+                    f"FQA D 轨模型月度循环 — {cycle.get('date', '?')} "
+                    f"{'晋升' if cycle.get('promote') else '留任现役'}"
+                    f"（Δ {cycle.get('delta_pp', 0):+.2f}pp）"
                 )
                 body = (
-                    f"# FQA 周度自动闭环\n\n"
-                    f"- 数据截至: {weekly.get('data_through')}\n"
-                    f"- 基线 Sharpe: {weekly.get('baseline_sharpe', 0):.3f}\n"
-                    f"- 新 Sharpe: {weekly.get('new_sharpe', 0):.3f}\n"
-                    f"- promote: {'是' if weekly.get('promoted') else '否（保留原工件）'}\n"
+                    f"# FQA D 轨模型月度自优化\n\n"
+                    f"- 评估窗: {cycle.get('window')}\n"
+                    f"- 挑战者收益: {cycle.get('challenger_return', 0):.2%} vs "
+                    f"现役 {cycle.get('incumbent_return', 0):.2%}\n"
+                    f"- Δ {cycle.get('delta_pp', 0):+.2f}pp（边际 {cycle.get('margin_pp', 0):+.2f}pp）\n"
+                    f"- 违规: {cycle.get('violations', {})}\n"
+                    f"- 决策: {'晋升 ' + str(cycle.get('promoted_artifact', '')) if cycle.get('promote') else '留任现役（挑战者弃用）'}\n"
                 )
                 email = mailer.send_mail(subject, body)
             else:
                 email = mailer.send_mail(
-                    "FQA 周度闭环运行失败", _failure_email_text("FQA 周度闭环运行失败", proc)
+                    "FQA D 轨模型月度循环失败",
+                    _failure_email_text("FQA D 轨模型月度循环失败",
+                                        proc2 if not ok_refit else proc),
                 )
 
         result = {
             "ok": ok,
-            "returncode": proc.get("returncode"),
-            "promoted": bool(weekly.get("promoted", False)),
-            "baseline_sharpe": weekly.get("baseline_sharpe"),
-            "new_sharpe": weekly.get("new_sharpe"),
-            "data_through": weekly.get("data_through"),
+            "ok_decide": ok_decide,
+            "ok_refit": ok_refit,
+            "decision": {k: v for k, v in cycle.items() if k != "violations"},
             "emailed": bool(email.get("ok")),
-            "stderr_tail": (proc.get("stderr") or "")[-500:],
         }
-        db.log_operation("quant_weekly_run", {}, {k: v for k, v in result.items() if k != "stderr_tail"})
+        db.log_operation("quant_weekly_run", {}, {k: v for k, v in result.items()})
         ws.publish("quant_weekly_ran", result)
     except Exception as exc:  # noqa: BLE001
         logger.exception("weekly cycle failed")
@@ -403,6 +431,30 @@ def run_weekly_cycle() -> dict[str, Any]:
         ws.publish("quant_weekly_ran", result)
     _last_weekly_run = result
     return result
+
+
+def run_d_challenger_daily() -> dict[str, Any]:
+    """Weekday 17:45 — advance the D-track model challenger (parallel shadow).
+
+    Same D-track book/executor/intraday semantics, different ML scanner; its
+    own ledger. Point-in-time like the main track. The promotion gate consumes
+    this ledger on the first Sunday of each month.
+    """
+    try:
+        if not settings.get_bool("quant_d_cycle_enabled", False):
+            return {"ok": True, "skipped": "D 轨模型自优化循环未启用（quant_d_cycle_enabled=false）"}
+        proc = _ensure_pit_db_or_fail() or quant_manager.run_project_command(
+            "python cli.py dcycle challenger", timeout=3600
+        )
+        ok = proc.get("returncode") == 0
+        db.log_operation(
+            "quant_d_challenger", {},
+            {"ok": ok, "tail": (proc.get("stdout") or "")[-200:]},
+        )
+        return {"ok": ok}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("d challenger run failed")
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
 # --------------------------------------------------------------------------- #
@@ -461,40 +513,43 @@ def run_shadow_daily() -> dict[str, Any]:
 
 
 def run_calibration() -> dict[str, Any]:
-    """Run the §7 calibration and email the report."""
+    """Saturday slot — D-cycle cost-consistency audit (replaces the old §7 calibrate).
+
+    The real A-share cost structure is regulatory-fixed (commission 2.5bp min5 /
+    stamp 5bp sell / transfer 0.1bp): ``cli.py dcycle audit-cost`` verifies the
+    configured model matches it and alerts on any accumulated deviation — no
+    parameter tuning. No PIT database required.
+    """
     global _last_calibration_run
     result: dict[str, Any] = {"ok": False}
     ws.publish("quant_calibration_started", {"ts": datetime.now().isoformat(timespec="seconds")})
     try:
-        proc = _ensure_pit_db_or_fail() or quant_manager.run_project_command("python cli.py calibrate", timeout=3600)
+        proc = quant_manager.run_project_command("python cli.py dcycle audit-cost", timeout=1800)
         ok = proc.get("returncode") == 0
-        cal = quant_manager.read_s7_calibration()
-        report = _read_report("outputs/s7_calibration.md")
+        tail = (proc.get("stdout") or "")[-400:]
 
-        email: dict[str, Any] = {"ok": False, "error": "no result"}
-        if ok and cal is not None:
-            if not report:
-                report = _calibration_summary_text(cal)
-            email = mailer.send_mail(f"FQA §7 回校报告 — {cal.get('as_of')}", report)
-        elif not ok:
-            email = mailer.send_mail(
-                "FQA §7 回校运行失败", _failure_email_text("FQA §7 回校运行失败", proc)
-            )
+        email: dict[str, Any] = {"ok": False, "error": "auto-email disabled"}
+        if settings.get_bool("quant_shadow_auto_email", True):
+            if ok:
+                email = mailer.send_mail("FQA 成本模型一致性检查（替代 §7 回校）", tail or "ok")
+            else:
+                email = mailer.send_mail(
+                    "FQA 成本模型一致性检查失败",
+                    _failure_email_text("FQA 成本模型一致性检查失败", proc),
+                )
 
         result = {
             "ok": ok,
             "returncode": proc.get("returncode"),
-            "as_of": cal.get("as_of") if cal else None,
-            "applied": cal.get("applied", {}).get("changed", {}) if cal else {},
+            "detail": tail,
             "emailed": bool(email.get("ok")),
             "email": email,
-            "stderr_tail": (proc.get("stderr") or "")[-500:],
         }
         db.log_operation("quant_calibration_run", {},
-                         {k: v for k, v in result.items() if k not in ("stderr_tail", "applied")})
+                         {k: v for k, v in result.items() if k not in ("detail", "email")})
         ws.publish("quant_calibrated", result)
     except Exception as exc:  # noqa: BLE001
-        logger.exception("calibration run failed")
+        logger.exception("cost audit run failed")
         result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         ws.publish("quant_calibrated", result)
     _last_calibration_run = result
@@ -625,6 +680,12 @@ def start_scheduler() -> None:
                 refresh_intraday_daily_job,
                 CronTrigger(day_of_week="mon-fri", hour=15, minute=30),
                 id=INTRA_JOB_ID, replace_existing=True,
+                misfire_grace_time=3600, coalesce=True,
+            )
+            scheduler.add_job(
+                run_d_challenger_daily,
+                CronTrigger(day_of_week="mon-fri", hour=17, minute=45),
+                id=CHALLENGER_JOB_ID, replace_existing=True,
                 misfire_grace_time=3600, coalesce=True,
             )
             scheduler.start()

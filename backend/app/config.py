@@ -48,6 +48,12 @@ DEFAULTS: dict[str, Any] = {
     # (shadow → kill-switch risk gate → periodic §7 re-calibration → factor-decay
     # monitor) instead of a bare ``shadow`` run. Disable to fall back to shadow-only.
     "quant_autopilot_enabled": "true",
+    # D-track model self-optimization cycle (monthly rolling refit + parallel
+    # challenger + forward promotion gate, replacing the old Saturday calibrate
+    # and Sunday weekly). OFF by default — enabled only after the historical
+    # evidence experiment (scripts/d_model_cycle_eval.py) shows a positive
+    # out-of-sample effect.
+    "quant_d_cycle_enabled": "false",
     # LLM
     "llm_provider": "deepseek",
     "llm_model": "deepseek-chat",
