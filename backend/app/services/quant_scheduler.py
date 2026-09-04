@@ -35,6 +35,23 @@ SHADOW_JOB_ID = "quant_shadow_daily"
 CALIBRATE_JOB_ID = "quant_calibrate"
 WEEKLY_JOB_ID = "quant_weekly_cycle"
 DEPTH_JOB_ID = "quant_depth_snapshot"
+LIVE_JOB_ID = "quant_live_start"
+
+
+def start_live_trader() -> dict[str, Any]:
+    """Weekday 09:25 — launch the FQA real-time intraday trader (detached).
+
+    ``python cli.py live`` polls the latest minute print and executes D-track
+    stop breaches at the actual moment; it self-exits at 15:10 and a pid lock
+    makes double-starts no-ops.
+    """
+    try:
+        proc = quant_manager.run_command(command="python cli.py live")
+        db.log_operation("quant_live_start", {}, {"pid": proc.get("pid")})
+        return {"ok": True, "pid": proc.get("pid")}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("live trader launch failed")
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 _scheduler: BackgroundScheduler | None = None
 _started = False
@@ -563,6 +580,12 @@ def start_scheduler() -> None:
                 collect_depth_daily,
                 CronTrigger(day_of_week="mon-fri", hour=14, minute=50),
                 id=DEPTH_JOB_ID, replace_existing=True,
+                misfire_grace_time=3600, coalesce=True,
+            )
+            scheduler.add_job(
+                start_live_trader,
+                CronTrigger(day_of_week="mon-fri", hour=9, minute=25),
+                id=LIVE_JOB_ID, replace_existing=True,
                 misfire_grace_time=3600, coalesce=True,
             )
             scheduler.start()

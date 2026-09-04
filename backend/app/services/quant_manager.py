@@ -1103,6 +1103,27 @@ def read_trade_records(account: str = "", limit: int = 200, date: str | None = N
         con.close()
 
 
+def read_live_status(account: str = "") -> dict[str, Any] | None:
+    """Parse the FQA real-time intraday trader status ``outputs/live_<account>.json``.
+
+    ``account`` "" resolves to ``live.account`` in the master config (default
+    ``D_5W``). ``None`` means the trader has not run yet (no file); the payload
+    carries minute-precision ``ts``, live equity/cash/invested% and per-position
+    P&L refreshed at every poll — never backfilled from past timestamps.
+    """
+    root = Path(_project_root())
+    name = str(account or "").strip()
+    if not name:
+        cfg = _load_yaml(root / "configs" / "master_config.yaml")
+        live_cfg = cfg.get("live") if isinstance(cfg, dict) else None
+        live_cfg = live_cfg if isinstance(live_cfg, dict) else {}
+        name = str(live_cfg.get("account") or "D_5W")
+    data = _read_output_json(root, (f"outputs/live_{name}.json",))
+    if data is not None:
+        data.setdefault("account", name)
+    return data
+
+
 # --------------------------------------------------------------------------- #
 # Config file read / write
 # --------------------------------------------------------------------------- #

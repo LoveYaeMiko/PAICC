@@ -40,6 +40,68 @@ interface TradeRecord {
   notional: number
 }
 
+/** Real-time intraday trader status (outputs/live_<account>.json). */
+interface LivePosition {
+  symbol: string
+  shares: number
+  last: number
+  entry?: number | null
+  stop?: number | null
+  pnl?: number | null
+  pnl_pct?: number | null
+}
+
+interface LiveStatus {
+  account?: string
+  ts?: string
+  equity_live?: number
+  cash?: number
+  invested_pct?: number
+  positions?: LivePosition[]
+}
+
+const livePositionColumns: TableColumnsType<LivePosition> = [
+  { title: '标的', dataIndex: 'symbol', key: 'symbol', className: 'mono' },
+  {
+    title: '股数',
+    dataIndex: 'shares',
+    key: 'shares',
+    align: 'right',
+    render: (v: number) => (v == null ? '—' : v.toLocaleString('zh-CN', { maximumFractionDigits: 0 })),
+  },
+  { title: '现价', dataIndex: 'last', key: 'last', align: 'right', render: (v: number) => v?.toFixed(2) },
+  {
+    title: '入场价',
+    dataIndex: 'entry',
+    key: 'entry',
+    align: 'right',
+    render: (v: number | null) => (v == null ? '—' : v.toFixed(2)),
+  },
+  {
+    title: '止损价',
+    dataIndex: 'stop',
+    key: 'stop',
+    align: 'right',
+    render: (v: number | null) => (v == null ? '—' : v.toFixed(2)),
+  },
+  {
+    title: '盈亏',
+    dataIndex: 'pnl',
+    key: 'pnl',
+    align: 'right',
+    render: (v: number | null) =>
+      v == null ? '—' : <span style={{ color: v >= 0 ? '#ff4d4f' : '#52c41a' }}>{v.toFixed(2)}</span>,
+  },
+  {
+    title: '盈亏%',
+    dataIndex: 'pnl_pct',
+    key: 'pnl_pct',
+    align: 'right',
+    render: (v: number | null) =>
+      v == null ? '—' : <span style={{ color: v >= 0 ? '#ff4d4f' : '#52c41a' }}>{`${v.toFixed(2)}%`}</span>,
+  },
+]
+
 const tradeColumns: TableColumnsType<TradeRecord> = [
   { title: '日期', dataIndex: 'date', key: 'date', width: 100 },
   {
@@ -206,7 +268,9 @@ const positionColumns: TableColumnsType<{
 function AccountTab({ account }: { account: AccountStatus }): JSX.Element {
   const [trades, setTrades] = useState<TradeRecord[]>([])
   const [loading, setLoading] = useState(true)
+  const [live, setLive] = useState<LiveStatus | null>(null)
   const st = account.status
+  const isPullback = st?.account_config?.alpha_source === 'pullback'
 
   useEffect(() => {
     setLoading(true)
@@ -216,6 +280,29 @@ function AccountTab({ account }: { account: AccountStatus }): JSX.Element {
       .catch(() => setTrades([]))
       .finally(() => setLoading(false))
   }, [account.name])
+
+  // D track only: poll the real-time intraday trader status (minute-precision
+  // P&L, updated by `cli.py live` at every poll during trading hours).
+  useEffect(() => {
+    if (!isPullback) return undefined
+    let cancelled = false
+    const poll = (): void => {
+      api
+        .get<LiveStatus | null>('/quant/live', { params: { account: account.name } })
+        .then((r) => {
+          if (!cancelled) setLive(r.data ?? null)
+        })
+        .catch(() => {
+          if (!cancelled) setLive(null)
+        })
+    }
+    poll()
+    const timer = window.setInterval(poll, 30_000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [account.name, isPullback])
 
   if (!st) {
     return <Empty description="该账户暂无影子状态 — 运行影子模式后显示" image={Empty.PRESENTED_IMAGE_SIMPLE} />
@@ -284,6 +371,43 @@ function AccountTab({ account }: { account: AccountStatus }): JSX.Element {
           <Statistic title="期末现金" value={eq.final_cash ?? 0} precision={2} />
         </Col>
       </Row>
+      {isPullback && live ? (
+        <Card
+          size="small"
+          title={
+            <Space size={8}>
+              <span>盘中实时（逐分钟）</span>
+              <Tag color="processing">实时</Tag>
+              <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                更新于 {live.ts ?? '—'}
+              </Typography.Text>
+            </Space>
+          }
+        >
+          <Row gutter={[12, 12]}>
+            <Col xs={12} sm={6} md={4}>
+              <Statistic title="实时权益" value={live.equity_live ?? 0} precision={2} />
+            </Col>
+            <Col xs={12} sm={6} md={4}>
+              <Statistic title="实时现金" value={live.cash ?? 0} precision={2} />
+            </Col>
+            <Col xs={12} sm={6} md={4}>
+              <Statistic title="仓位占比" value={live.invested_pct ?? 0} precision={1} suffix="%" />
+            </Col>
+            <Col xs={12} sm={6} md={4}>
+              <Statistic title="实时持仓" value={live.positions?.length ?? 0} />
+            </Col>
+          </Row>
+          <Table<LivePosition>
+            rowKey={(r) => r.symbol}
+            columns={livePositionColumns}
+            dataSource={live.positions ?? []}
+            size="small"
+            pagination={false}
+            scroll={{ y: 220 }}
+          />
+        </Card>
+      ) : null}
       {st.equity_curve?.length ? (
         <Row gutter={[12, 12]}>
           <Col xs={24} lg={12}>

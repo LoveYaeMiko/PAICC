@@ -177,6 +177,19 @@ def trade_records(account: str = "", limit: int = 200, date: str | None = None) 
     return quant_manager.read_trade_records(account=account, limit=limit, date=date)
 
 
+@router.get("/live")
+def live_status(account: str = "") -> dict[str, Any] | None:
+    """Real-time intraday trader status (D track): minute-precision live P&L.
+
+    Written by ``cli.py live`` at every poll (only while trading hours);
+    ``None`` before the first live run of the day.
+    """
+    try:
+        return quant_manager.read_live_status(account=account)
+    except quant_manager.OutputCorruptError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @router.get("/calibration")
 def calibration_result() -> dict[str, Any] | None:
     """Latest §7 calibration result (PEAD 幅度/舆情阈值/成本模型), or None."""
