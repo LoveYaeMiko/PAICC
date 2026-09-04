@@ -31,6 +31,7 @@ interface AccountStatus {
 interface TradeRecord {
   seq: number
   date: string
+  time?: string
   symbol: string
   side: string
   shares: number
@@ -40,7 +41,15 @@ interface TradeRecord {
 }
 
 const tradeColumns: TableColumnsType<TradeRecord> = [
-  { title: '日期', dataIndex: 'date', key: 'date', width: 110 },
+  { title: '日期', dataIndex: 'date', key: 'date', width: 100 },
+  {
+    title: '时间',
+    dataIndex: 'time',
+    key: 'time',
+    width: 70,
+    className: 'mono',
+    render: (v: string) => v || '收盘',
+  },
   { title: '代码', dataIndex: 'symbol', key: 'symbol', className: 'mono' },
   {
     title: '方向',

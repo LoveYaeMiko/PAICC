@@ -1083,13 +1083,13 @@ def read_trade_records(account: str = "", limit: int = 200, date: str | None = N
     try:
         if date:
             rows = con.execute(
-                "SELECT seq, date, symbol, side, shares, price, commission, notional "
+                "SELECT seq, date, time, symbol, side, shares, price, commission, notional "
                 "FROM fills WHERE date = ? ORDER BY seq DESC LIMIT ?",
                 (date, limit),
             ).fetchall()
         else:
             rows = con.execute(
-                "SELECT seq, date, symbol, side, shares, price, commission, notional "
+                "SELECT seq, date, time, symbol, side, shares, price, commission, notional "
                 "FROM fills ORDER BY seq DESC LIMIT ?",
                 (limit,),
             ).fetchall()
