@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 SHADOW_JOB_ID = "quant_shadow_daily"
 CALIBRATE_JOB_ID = "quant_calibrate"
 WEEKLY_JOB_ID = "quant_weekly_cycle"
+DEPTH_JOB_ID = "quant_depth_snapshot"
 
 _scheduler: BackgroundScheduler | None = None
 _started = False
@@ -508,6 +509,22 @@ def _fire_missed_today_jobs() -> None:
         )
 
 
+def collect_depth_daily() -> dict[str, Any]:
+    """Weekday 14:50 AlphaFeed depth snapshot (live-execution layer dataset).
+
+    Depth has no history, so this only accumulates a forward dataset — it does
+    not touch the shadow ledger or any backtest number.
+    """
+    try:
+        proc = quant_manager.run_project_command("python scripts/collect_depth.py", timeout=600)
+        db.log_operation("quant_depth_snapshot", {},
+                         {"ok": proc.get("returncode") == 0, "tail": (proc.get("stdout") or "")[-200:]})
+        return {"ok": proc.get("returncode") == 0}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("depth snapshot failed")
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
 def start_scheduler() -> None:
     """Idempotently start the shadow + calibration schedulers + startup catch-up."""
     global _scheduler, _started
@@ -541,6 +558,12 @@ def start_scheduler() -> None:
                 CronTrigger(day_of_week="sun", hour=wh, minute=wm),
                 id=WEEKLY_JOB_ID, replace_existing=True,
                 misfire_grace_time=86400, coalesce=True,
+            )
+            scheduler.add_job(
+                collect_depth_daily,
+                CronTrigger(day_of_week="mon-fri", hour=14, minute=50),
+                id=DEPTH_JOB_ID, replace_existing=True,
+                misfire_grace_time=3600, coalesce=True,
             )
             scheduler.start()
             _scheduler = scheduler
