@@ -36,6 +36,7 @@ CALIBRATE_JOB_ID = "quant_calibrate"
 WEEKLY_JOB_ID = "quant_weekly_cycle"
 DEPTH_JOB_ID = "quant_depth_snapshot"
 LIVE_JOB_ID = "quant_live_start"
+INTRA_JOB_ID = "quant_intraday_refresh"
 
 
 def start_live_trader() -> dict[str, Any]:
@@ -51,6 +52,30 @@ def start_live_trader() -> dict[str, Any]:
         return {"ok": True, "pid": proc.get("pid")}
     except Exception as exc:  # noqa: BLE001
         logger.exception("live trader launch failed")
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def refresh_intraday_daily_job() -> dict[str, Any]:
+    """Weekday 15:30 — refresh the intraday feature rollup after the close.
+
+    The D-track tail-volume entry gate treats a missing current-day row as
+    FAIL (no new entries), so this job fetches the latest minute bars and
+    rebuilds ``data/intraday/daily_features.parquet`` BEFORE the 17:30 loop.
+    The 17:30 loop additionally self-heals via ``ensure_intraday_current``,
+    so a missed 15:30 never starves the gate.
+    """
+    try:
+        proc = quant_manager.run_project_command(
+            "python scripts/refresh_intraday_daily.py", timeout=1800
+        )
+        ok = proc.get("returncode") == 0
+        db.log_operation(
+            "quant_intraday_refresh", {},
+            {"ok": ok, "tail": (proc.get("stdout") or "")[-200:]},
+        )
+        return {"ok": ok}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("intraday refresh failed")
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 _scheduler: BackgroundScheduler | None = None
@@ -586,6 +611,12 @@ def start_scheduler() -> None:
                 start_live_trader,
                 CronTrigger(day_of_week="mon-fri", hour=9, minute=25),
                 id=LIVE_JOB_ID, replace_existing=True,
+                misfire_grace_time=3600, coalesce=True,
+            )
+            scheduler.add_job(
+                refresh_intraday_daily_job,
+                CronTrigger(day_of_week="mon-fri", hour=15, minute=30),
+                id=INTRA_JOB_ID, replace_existing=True,
                 misfire_grace_time=3600, coalesce=True,
             )
             scheduler.start()
