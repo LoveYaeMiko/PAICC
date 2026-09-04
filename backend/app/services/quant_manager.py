@@ -1070,6 +1070,9 @@ def read_trade_records(account: str = "", limit: int = 200, date: str | None = N
 
     ``account`` "" reads the legacy ledger; otherwise ``shadow_ledger_<name>.sqlite``.
     ``date`` (ISO) filters fills to one trading day (the daily-report trades view).
+    Each SELL fill carries ``entry_price`` — the position's moving-average buy
+    price at the moment of that sell (same semantics as FQA ``enrich_positions``),
+    so the panel can show 买入价/卖出价 side by side.
     """
     import sqlite3
 
@@ -1081,19 +1084,53 @@ def read_trade_records(account: str = "", limit: int = 200, date: str | None = N
     con = sqlite3.connect(f"file:{ledger}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
+        # Full history in seq order: the moving-average entry price of every
+        # sell depends on ALL preceding fills of that symbol, so compute the
+        # cost basis first and only then apply the date/limit window.
+        rows = con.execute(
+            "SELECT seq, date, time, symbol, side, shares, price, commission, notional "
+            "FROM fills ORDER BY seq"
+        ).fetchall()
+        basis: dict[str, float] = {}
+        signed: dict[str, float] = {}
+        enriched: list[dict[str, Any]] = []
+        for r in rows:
+            sym = str(r["symbol"])
+            qty = float(r["shares"])
+            px = float(r["price"])
+            side = str(r["side"] or "").lower()
+            s = signed.get(sym, 0.0)
+            b = basis.get(sym, 0.0)
+            entry = None
+            if s != 0.0 and side == "sell":
+                entry = b / s  # avg buy price BEFORE this sell is applied
+            if s == 0.0:
+                signed[sym] = qty
+                basis[sym] = qty * px
+            elif (qty > 0) == (s > 0):
+                signed[sym] = s + qty
+                basis[sym] = b + qty * px
+            else:
+                avg = b / s
+                closing = min(abs(qty), abs(s))
+                sign = 1.0 if s > 0 else -1.0
+                new_b = b - sign * closing * avg
+                new_s = s + qty
+                remaining = abs(qty) - closing
+                if remaining > 0:
+                    open_sign = 1.0 if qty > 0 else -1.0
+                    new_s = open_sign * remaining
+                    new_b = open_sign * remaining * px
+                signed[sym] = new_s
+                basis[sym] = new_b
+            d = dict(r)
+            d["entry_price"] = round(float(entry), 4) if entry is not None else None
+            enriched.append(d)
+
         if date:
-            rows = con.execute(
-                "SELECT seq, date, time, symbol, side, shares, price, commission, notional "
-                "FROM fills WHERE date = ? ORDER BY seq DESC LIMIT ?",
-                (date, limit),
-            ).fetchall()
+            fills = [d for d in enriched if d["date"] == date][-limit:][::-1]
         else:
-            rows = con.execute(
-                "SELECT seq, date, time, symbol, side, shares, price, commission, notional "
-                "FROM fills ORDER BY seq DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
-        fills = [dict(r) for r in rows]
+            fills = enriched[-limit:][::-1]
         days = con.execute(
             "SELECT date, cash, equity, gross_exposure, n_fills, commission "
             "FROM daily_state ORDER BY date DESC LIMIT 60"

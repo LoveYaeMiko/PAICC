@@ -38,6 +38,8 @@ interface TradeRecord {
   price: number
   commission: number
   notional: number
+  /** 卖出笔的移动加权买入价（FQA 成本口径）；买入笔为 null */
+  entry_price?: number | null
 }
 
 /** Real-time intraday trader status (outputs/live_<account>.json). */
@@ -121,13 +123,20 @@ const tradeColumns: TableColumnsType<TradeRecord> = [
     render: (v: string) => <Tag color={v === 'buy' ? 'red' : 'green'}>{v === 'buy' ? '买' : '卖'}</Tag>,
   },
   {
+    title: '买入价',
+    dataIndex: 'entry_price',
+    key: 'entry_price',
+    align: 'right',
+    render: (v: number | null, r) => (r.side === 'sell' && v != null ? v.toFixed(2) : '—'),
+  },
+  {
     title: '股数',
     dataIndex: 'shares',
     key: 'shares',
     align: 'right',
     render: (v: number) => (v == null ? '—' : v.toLocaleString('zh-CN', { maximumFractionDigits: 0 })),
   },
-  { title: '价格', dataIndex: 'price', key: 'price', align: 'right', render: (v: number) => v?.toFixed(2) },
+  { title: '成交价', dataIndex: 'price', key: 'price', align: 'right', render: (v: number) => v?.toFixed(2) },
   { title: '佣金', dataIndex: 'commission', key: 'commission', align: 'right', render: (v: number) => v?.toFixed(2) },
   {
     title: '金额',
@@ -240,6 +249,20 @@ const positionColumns: TableColumnsType<{
     key: 'shares',
     align: 'right',
     render: (v: number) => (v == null ? '—' : v.toLocaleString('zh-CN')),
+  },
+  {
+    title: '买入价',
+    dataIndex: 'entry_price',
+    key: 'entry_price',
+    align: 'right',
+    render: (v: number | null) => (v == null ? '—' : v.toFixed(2)),
+  },
+  {
+    title: '现价',
+    dataIndex: 'last_price',
+    key: 'last_price',
+    align: 'right',
+    render: (v: number | null) => (v == null ? '—' : v.toFixed(2)),
   },
   {
     title: '权重',
