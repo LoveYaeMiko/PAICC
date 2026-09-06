@@ -612,6 +612,19 @@ def _fire_missed_today_jobs() -> None:
             ("quant_weekly_run", "quant_catchup_weekly"),
             run_weekly_cycle,
         )
+    # Forward-only live resume: whenever the backend (re)starts DURING trading
+    # hours (computer reboot / app restart / backend crash), launch the live
+    # trader for the remaining session. ``cli.py live`` is idempotent via its
+    # pid lock and only ever reads CURRENT prints, so a resume never trades a
+    # past timestamp — fully compliant with the D-track live discipline. The
+    # PIT ensure inside start_live_trader self-heals Docker as well.
+    if now.weekday() < 5 and (9, 30) <= (now.hour, now.minute) < (15, 10):
+        db.log_operation(
+            "quant_live_resume", {"date": now.strftime("%Y-%m-%d")}, {"launched": True}
+        )
+        threading.Thread(
+            target=start_live_trader, daemon=True, name="quant-live-resume"
+        ).start()
 
 
 def collect_depth_daily() -> dict[str, Any]:
