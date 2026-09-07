@@ -40,8 +40,11 @@ DEFAULTS: dict[str, Any] = {
     "quant_config_file": "configs/master_config.yaml",
     "quant_log_dir": "logs",
     "quant_dashboard_script": "",
-    # Quant shadow/calibration scheduler (weekday EOD + weekly calibration)
-    "quant_shadow_daily_time": "17:30",
+    # Quant shadow/calibration scheduler (weekday EOD + weekly calibration).
+    # The daily closed loop runs at 15:10 — right after the 15:00 closing
+    # auction (the D track's 14:55 preclose orders fill at the auction close),
+    # instead of the legacy 17:30 evening slot.
+    "quant_shadow_daily_time": "15:10",
     "quant_calibrate_time": "18:00",
     "quant_shadow_auto_email": "true",
     # Drive the daily job with FQA's end-to-end autopilot closed loop

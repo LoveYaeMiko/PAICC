@@ -38,6 +38,34 @@ DEPTH_JOB_ID = "quant_depth_snapshot"
 LIVE_JOB_ID = "quant_live_start"
 INTRA_JOB_ID = "quant_intraday_refresh"
 CHALLENGER_JOB_ID = "quant_d_challenger"
+PRECLOSE_JOB_ID = "quant_preclose"
+
+
+def run_preclose_daily() -> dict[str, Any]:
+    """Weekday 14:55 — decide the D-track closing-auction order list.
+
+    ``cli.py preclose`` computes the close-rebalance orders from 14:55-known
+    data (provisional minute bars + T-1 ML ranks) and persists them; the
+    daily close run then fills exactly that list at the 15:00 auction close.
+    A late/retroactive run is refused: orders decided AFTER the auction would
+    trade on information a real 14:57 order could not have had.
+    """
+    try:
+        now = datetime.now()
+        if not ((14, 45) <= (now.hour, now.minute) <= (15, 10)):
+            return {"ok": True, "skipped": f"outside 14:45-15:10 ({now:%H:%M}) — no retroactive orders"}
+        proc = _ensure_pit_db_or_fail() or quant_manager.run_project_command(
+            "python cli.py preclose", timeout=900
+        )
+        ok = proc.get("returncode") == 0
+        db.log_operation(
+            "quant_preclose", {},
+            {"ok": ok, "tail": (proc.get("stdout") or "")[-300:]},
+        )
+        return {"ok": ok}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("preclose order layer failed")
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
 def start_live_trader() -> dict[str, Any]:
@@ -65,13 +93,13 @@ def start_live_trader() -> dict[str, Any]:
 
 
 def refresh_intraday_daily_job() -> dict[str, Any]:
-    """Weekday 15:30 — refresh the intraday feature rollup after the close.
+    """Weekday 15:02 — refresh the intraday feature rollup right after the close.
 
     The D-track tail-volume entry gate treats a missing current-day row as
     FAIL (no new entries), so this job fetches the latest minute bars and
-    rebuilds ``data/intraday/daily_features.parquet`` BEFORE the 17:30 loop.
-    The 17:30 loop additionally self-heals via ``ensure_intraday_current``,
-    so a missed 15:30 never starves the gate.
+    rebuilds ``data/intraday/daily_features.parquet`` BEFORE the 15:10 loop.
+    The 15:10 loop additionally self-heals via ``ensure_intraday_current``,
+    so a missed 15:02 never starves the gate.
     """
     try:
         proc = quant_manager.run_project_command(
@@ -691,9 +719,17 @@ def start_scheduler() -> None:
             )
             scheduler.add_job(
                 refresh_intraday_daily_job,
-                CronTrigger(day_of_week="mon-fri", hour=15, minute=30),
+                CronTrigger(day_of_week="mon-fri", hour=15, minute=2),
                 id=INTRA_JOB_ID, replace_existing=True,
                 misfire_grace_time=3600, coalesce=True,
+            )
+            scheduler.add_job(
+                run_preclose_daily,
+                CronTrigger(day_of_week="mon-fri", hour=14, minute=55),
+                id=PRECLOSE_JOB_ID, replace_existing=True,
+                # no long grace: a late preclose is refused by the time guard
+                # inside run_preclose_daily (never decide orders retroactively)
+                misfire_grace_time=60, coalesce=True,
             )
             scheduler.add_job(
                 run_d_challenger_daily,
