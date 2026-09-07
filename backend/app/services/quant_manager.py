@@ -1021,10 +1021,15 @@ def read_autopilot_states() -> dict[str, Any]:
 # Dual-capital accounts (A_200W / B_10W) — per-account status + trade records
 # --------------------------------------------------------------------------- #
 def _shadow_account_names() -> list[str]:
-    """Account names from ``shadow.accounts`` in the master config (fallback: legacy)."""
+    """Account names from ``shadow.accounts`` in the master config (fallback: legacy).
+
+    Sorted by ``priority`` DESC so the live D track (100) leads the panel tabs
+    and the status payloads — matching the FQA run order.
+    """
     root = Path(_project_root())
     cfg = _load_yaml(root / "configs" / "master_config.yaml")
     accounts = (cfg or {}).get("shadow", {}).get("accounts") or []
+    accounts = sorted(accounts, key=lambda a: int(a.get("priority", 0) or 0), reverse=True)
     names = [str(a.get("name")) for a in accounts if a.get("name")]
     return names
 
