@@ -42,18 +42,20 @@ PRECLOSE_JOB_ID = "quant_preclose"
 
 
 def run_preclose_daily() -> dict[str, Any]:
-    """Weekday 14:55 — decide the D-track closing-auction order list.
+    """Weekday 14:50 — decide the D-track closing-auction order list.
 
-    ``cli.py preclose`` computes the close-rebalance orders from 14:55-known
+    ``cli.py preclose`` computes the close-rebalance orders from 14:50-known
     data (provisional minute bars + T-1 ML ranks) and persists them; the
     daily close run then fills exactly that list at the 15:00 auction close.
-    A late/retroactive run is refused: orders decided AFTER the auction would
-    trade on information a real 14:57 order could not have had.
+    Started 10 minutes before the auction because the full-universe minute
+    fetch + market build takes ~5-8 minutes. A late/retroactive run is
+    refused: orders decided AFTER the auction would trade on information a
+    real 14:57 order could not have had.
     """
     try:
         now = datetime.now()
-        if not ((14, 45) <= (now.hour, now.minute) <= (15, 10)):
-            return {"ok": True, "skipped": f"outside 14:45-15:10 ({now:%H:%M}) — no retroactive orders"}
+        if not ((14, 40) <= (now.hour, now.minute) <= (15, 10)):
+            return {"ok": True, "skipped": f"outside 14:40-15:10 ({now:%H:%M}) — no retroactive orders"}
         proc = _ensure_pit_db_or_fail() or quant_manager.run_project_command(
             "python cli.py preclose", timeout=900
         )
@@ -725,7 +727,7 @@ def start_scheduler() -> None:
             )
             scheduler.add_job(
                 run_preclose_daily,
-                CronTrigger(day_of_week="mon-fri", hour=14, minute=55),
+                CronTrigger(day_of_week="mon-fri", hour=14, minute=50),
                 id=PRECLOSE_JOB_ID, replace_existing=True,
                 # no long grace: a late preclose is refused by the time guard
                 # inside run_preclose_daily (never decide orders retroactively)
