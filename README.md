@@ -75,6 +75,22 @@ python run.py                 # 默认 http://127.0.0.1:8000
 
 健康检查：`GET http://127.0.0.1:8000/api/health`
 
+### 后端测试
+
+`backend\.venv` 默认不含 pytest（运行依赖里没有它）。两种跑法：
+
+```powershell
+cd backend
+# A) 用系统 Python 的 pytest（零安装；PYTHONPATH 只加系统 site-packages，
+#    避开用户级 site-packages 里会覆盖标准库的旧 asyncio）
+$env:PYTHONPATH="C:\Users\<you>\AppData\Local\Programs\Python\Python312\Lib\site-packages"
+$env:PYTEST_DISABLE_PLUGIN_AUTOLOAD="1"
+.\.venv\Scripts\python.exe -m pytest -q
+
+# B) 完全用 venv 自带的 unittest（无需 pytest）
+.\.venv\Scripts\python.exe -m unittest discover -s tests -t .
+```
+
 ### 前端
 
 ```bash
