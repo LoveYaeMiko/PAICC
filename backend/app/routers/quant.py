@@ -167,7 +167,7 @@ def shadow_status() -> dict[str, Any] | None:
 
 @router.get("/accounts")
 def shadow_accounts() -> dict[str, Any]:
-    """Dual-capital accounts: per-account status/report/autopilot payloads."""
+    """Per-account shadow payloads (single D track: ``D_5W``)."""
     return quant_manager.read_shadow_accounts()
 
 
@@ -190,6 +190,25 @@ def live_status(account: str = "") -> dict[str, Any] | None:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+@router.get("/preclose")
+def preclose_orders(account: str = "") -> dict[str, Any]:
+    """D-track closing-auction order list (14:50 decision, simulated).
+
+    Reads FQA's ``outputs/preclose_orders_<account>.json``. ``account`` "" resolves
+    to ``live.account`` (default ``D_5W``). 404 when the list has not been decided
+    yet; ``stale=true`` when the payload's ``date`` is not today (historical).
+    """
+    try:
+        data = quant_manager.read_preclose_orders(account=account)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except quant_manager.OutputCorruptError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if data is None:
+        raise HTTPException(status_code=404, detail="no preclose orders")
+    return data
+
+
 @router.get("/calibration")
 def calibration_result() -> dict[str, Any] | None:
     """Latest §7 calibration result (PEAD 幅度/舆情阈值/成本模型), or None."""
@@ -201,7 +220,7 @@ def calibration_result() -> dict[str, Any] | None:
 
 @router.get("/autopilot")
 def autopilot_state() -> dict[str, Any]:
-    """Per-account autopilot control states (``{name: state}``) for the dual-track loop."""
+    """Per-account autopilot control states (``{name: state}``) for the D track."""
     try:
         return quant_manager.read_autopilot_states()
     except quant_manager.OutputCorruptError as exc:

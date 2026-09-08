@@ -267,6 +267,14 @@ export interface ShadowStatus {
   strategy?: ShadowStrategy
   account_name?: string
   account_config?: ShadowAccountConfig
+  /** Deployment channel reported by FQA (observe = simulated only, no real money). */
+  deployment?: {
+    mode: string
+    real_money_enabled: boolean
+    simulated_only?: boolean
+    observe_since?: string
+    note?: string
+  }
   equity_curve?: EquityPoint[]
   benchmark?: BenchmarkPoint[]
   excess_curve?: ExcessPoint[]
@@ -345,6 +353,16 @@ export interface S7Calibration {
   applied: { changed: Record<string, { old: string; new: string }>; unchanged: string[] }
 }
 
+/** One registered scheduler job (``/quant/schedule`` → ``jobs[]``). */
+export interface QuantScheduleJob {
+  id: string
+  name: string
+  cron: string
+  next_run: string | null
+  last_run: string | null
+  last_status: string | null
+}
+
 export interface QuantScheduleStatus {
   shadow_daily_time: string
   calibrate_time: string
@@ -356,6 +374,8 @@ export interface QuantScheduleStatus {
   last_calibration_run: Record<string, unknown> | null
   last_autopilot_run: Record<string, unknown> | null
   last_weekly_run?: Record<string, unknown> | null
+  /** Optional: older backends predate the per-job view. */
+  jobs?: QuantScheduleJob[]
 }
 
 export interface AutopilotState {

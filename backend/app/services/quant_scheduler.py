@@ -1,10 +1,24 @@
-"""Quant shadow/calibration daily scheduling + email (mirrors ``paper_service``).
+"""Quant **single-track (D)** daily scheduling + email.
 
-* weekday ``quant_shadow_daily_time`` (default 17:30) — run ``python cli.py shadow``
-  in the quant project root, read ``outputs/shadow_status.json``, email the daily
-  report, publish ``quant_shadow_ran`` over the WebSocket bus;
-* saturday ``quant_calibrate_time`` (default 18:00) — run ``python cli.py calibrate``,
-  read ``outputs/s7_calibration.json``, email the report, publish ``quant_calibrated``.
+FQA converged on one track: the A/B/C ML cross-section tracks retired on
+2026-09-08 and ``shadow.accounts`` now holds only ``D_5W``
+(``alpha_source: pullback``). D is still a **shadow/paper track — no real money
+is wired in**; every report/email below describes simulated results.
+
+The in-process APScheduler drives:
+
+* weekday 09:25 — launch the real-time intraday trader (``cli.py live``);
+* weekday 14:40 — AlphaFeed depth snapshot;
+* weekday 14:50 — closing-auction order list (``cli.py preclose``);
+* weekday 15:02 — intraday feature rollup refresh;
+* weekday ``quant_shadow_daily_time`` (default 15:10) — ``python cli.py
+  autopilot`` (or ``shadow`` when autopilot is disabled), read the outputs,
+  email the daily report, publish ``quant_shadow_ran`` over the WebSocket bus;
+* weekday 17:45 — D-track model challenger (parallel shadow book);
+* saturday ``quant_calibrate_time`` (default 18:00) — cost-model consistency
+  audit (replaces the legacy §7 recalibration);
+* sunday ``quant_weekly_time`` (default 18:00) — D-track monthly model cycle
+  (challenger promotion gate + rolling refit).
 
 APScheduler is **in-process**: the machine must be awake at the trigger time (the
 "24/7" note in the plan). ``misfire_grace_time`` + ``coalesce=True`` let a missed
@@ -166,6 +180,17 @@ def _parse_hhmm(value: Any, default: tuple[int, int]) -> tuple[int, int]:
     return default
 
 
+def _stamp(result: dict[str, Any]) -> dict[str, Any]:
+    """Tag a job result with its own wall-clock time.
+
+    The panel's 「任务调度」 card reports ``last_run`` from the in-memory
+    ``_last_*_run`` records, so each job stamps the moment it finished (an
+    existing key is never overwritten).
+    """
+    result.setdefault("ts", datetime.now().isoformat(timespec="seconds"))
+    return result
+
+
 def _quant_root() -> Path:
     root = str(settings.get_quant_root() or "").strip()
     return Path(root) if root else Path(".")
@@ -184,7 +209,7 @@ def _read_report(rel: str) -> str:
 def _shadow_summary_text(status: dict[str, Any]) -> str:
     eq = status.get("equity", {})
     lines = [
-        "# FQA 影子模式日报",
+        "# FQA D 轨影子日报（模拟盘）",
         "",
         f"- 观察日期: {status.get('last_trading_date') or status.get('as_of')}",
         f"- 数据新鲜度: {status.get('data_freshness_days')} 天",
@@ -320,7 +345,7 @@ def _autopilot_summary_text(state: dict[str, Any] | None, status: dict[str, Any]
     scale = state.get("gross_scale")
     scale_txt = f"{scale:g}" if isinstance(scale, (int, float)) else "1"
     lines = [
-        "# FQA 自动闭环日报",
+        "# FQA D 轨自动闭环日报（模拟盘）",
         "",
         f"- 运行时间: {state.get('last_evaluated') or state.get('since_date')}",
         f"- 观察日期: {status.get('last_trading_date') or status.get('as_of')}",
@@ -335,13 +360,15 @@ def _autopilot_summary_text(state: dict[str, Any] | None, status: dict[str, Any]
 
 
 def run_autopilot_daily() -> dict[str, Any]:
-    """Run FQA's dual-track end-to-end autopilot loop and email the report.
+    """Run FQA's single-track (D) end-to-end autopilot loop and email the report.
 
-    ``python cli.py autopilot`` advances each account's shadow (honouring its last
-    kill-switch decision), re-evaluates the per-account risk gate and persists the
-    operating mode (``autopilot_state_<name>.json``). ML accounts iterate their
-    model via the Sunday weekly job; factor-pool periodic tasks only run for pool
-    accounts. It is the single daily entry point that closes the loop.
+    ``python cli.py autopilot`` advances the D shadow book (honouring its last
+    kill-switch decision), re-evaluates the risk gate and persists the operating
+    mode (``autopilot_state_<name>.json``). The A/B/C ML tracks retired
+    2026-09-08, so ``shadow.accounts`` holds only ``D_5W``; the loop still
+    iterates whatever accounts the config lists, so the body degrades cleanly to
+    a single 「## 账户 D_5W」 section. It is the single daily entry point that
+    closes the loop. D remains a **simulated** book — no real money.
     """
     global _last_autopilot_run
     result: dict[str, Any] = {"ok": False}
@@ -371,12 +398,13 @@ def run_autopilot_daily() -> dict[str, Any]:
                         report = report.rstrip() + "\n\n---\n\n" + commentary
                 first = next(iter(states.values()), {}) or {}
                 date = first.get("last_evaluated")
-                email = mailer.send_mail(f"FQA 双资金轨自动闭环日报 — {date}", report)
+                email = mailer.send_mail(f"FQA D 轨自动闭环日报 — {date}", report)
             else:
                 # Run failed (PIT DB down, etc.) — the on-disk report is stale, so
                 # alert the operator instead of forwarding yesterday's numbers.
                 email = mailer.send_mail(
-                    "FQA 自动闭环运行失败", _failure_email_text("FQA 自动闭环运行失败", proc)
+                    "FQA D 轨自动闭环运行失败",
+                    _failure_email_text("FQA D 轨自动闭环运行失败", proc),
                 )
 
         result = {
@@ -394,7 +422,7 @@ def run_autopilot_daily() -> dict[str, Any]:
         logger.exception("autopilot daily run failed")
         result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         ws.publish("quant_autopilot_ran", result)
-    _last_autopilot_run = result
+    _last_autopilot_run = _stamp(result)
     return result
 
 
@@ -414,13 +442,13 @@ def run_weekly_cycle() -> dict[str, Any]:
         if not settings.get_bool("quant_d_cycle_enabled", False):
             result = {"ok": True, "skipped": "D 轨模型自优化循环未启用（quant_d_cycle_enabled=false）"}
             ws.publish("quant_weekly_ran", result)
-            _last_weekly_run = result
+            _last_weekly_run = _stamp(result)
             return result
         now = datetime.now()
         if now.day > 7:
             result = {"ok": True, "skipped": "非本月第一个周日 — 跳过月度模型循环"}
             ws.publish("quant_weekly_ran", result)
-            _last_weekly_run = result
+            _last_weekly_run = _stamp(result)
             return result
 
         proc = _ensure_pit_db_or_fail() or quant_manager.run_project_command(
@@ -484,7 +512,7 @@ def run_weekly_cycle() -> dict[str, Any]:
         logger.exception("weekly cycle failed")
         result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         ws.publish("quant_weekly_ran", result)
-    _last_weekly_run = result
+    _last_weekly_run = _stamp(result)
     return result
 
 
@@ -516,7 +544,13 @@ def run_d_challenger_daily() -> dict[str, Any]:
 # jobs
 # --------------------------------------------------------------------------- #
 def run_shadow_daily() -> dict[str, Any]:
-    """Run the dual-track shadow mode and email the combined daily report."""
+    """Run the single-track (D) shadow mode and email the daily report.
+
+    ``shadow.accounts`` holds only ``D_5W`` after the 2026-09-08 A/B/C
+    retirement, so the combined report is one 「## 账户 D_5W」 section; the loop
+    still walks the config list so a re-added account would appear automatically.
+    D is simulated (影子/模拟盘) — never described as live money.
+    """
     global _last_shadow_run
     result: dict[str, Any] = {"ok": False}
     ws.publish("quant_shadow_started", {"ts": datetime.now().isoformat(timespec="seconds")})
@@ -541,10 +575,10 @@ def run_shadow_daily() -> dict[str, Any]:
                     commentary = _generate_shadow_commentary(report)
                     if commentary:
                         report = report.rstrip() + "\n\n---\n\n" + commentary
-                email = mailer.send_mail(f"FQA 双资金轨影子日报 — {date}", report)
+                email = mailer.send_mail(f"FQA D 轨影子日报 — {date}", report)
             elif not ok:
                 email = mailer.send_mail(
-                    "FQA 影子模式运行失败", _failure_email_text("FQA 影子模式运行失败", proc)
+                    "FQA D 轨影子日报运行失败", _failure_email_text("FQA D 轨影子日报运行失败", proc)
                 )
 
         result = {
@@ -563,7 +597,7 @@ def run_shadow_daily() -> dict[str, Any]:
         logger.exception("shadow daily run failed")
         result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         ws.publish("quant_shadow_ran", result)
-    _last_shadow_run = result
+    _last_shadow_run = _stamp(result)
     return result
 
 
@@ -607,7 +641,7 @@ def run_calibration() -> dict[str, Any]:
         logger.exception("cost audit run failed")
         result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         ws.publish("quant_calibrated", result)
-    _last_calibration_run = result
+    _last_calibration_run = _stamp(result)
     return result
 
 
@@ -655,6 +689,30 @@ def _fire_missed_today_jobs() -> None:
             ("quant_autopilot_run", "quant_shadow_run", "quant_catchup_daily"),
             daily_job,
         )
+    # Intraday feature rollup (15:02) and the D-track challenger (17:45) are
+    # safe to catch up late: both are idempotent data/research steps that read
+    # already-closed data. The preclose layer is deliberately NOT caught up —
+    # its own time guard refuses to decide orders after the auction window
+    # (never trade a past timestamp).
+    if now.weekday() < 5 and (now.hour, now.minute) >= (15, 2):
+        fire_once(
+            "quant_catchup_intraday",
+            ("quant_intraday_refresh", "quant_catchup_intraday"),
+            refresh_intraday_daily_job,
+        )
+    if now.weekday() < 5 and (now.hour, now.minute) >= (17, 45):
+        fire_once(
+            "quant_catchup_challenger",
+            ("quant_d_challenger", "quant_catchup_challenger"),
+            run_d_challenger_daily,
+        )
+    # Depth is a LIVE intraday snapshot: only meaningful before the close.
+    if now.weekday() < 5 and (14, 40) <= (now.hour, now.minute) < (15, 10):
+        fire_once(
+            "quant_catchup_depth",
+            ("quant_depth_snapshot", "quant_catchup_depth"),
+            collect_depth_daily,
+        )
     if now.weekday() == 5 and (now.hour, now.minute) >= (ch, cm):
         fire_once(
             "quant_catchup_calibrate",
@@ -683,10 +741,11 @@ def _fire_missed_today_jobs() -> None:
 
 
 def collect_depth_daily() -> dict[str, Any]:
-    """Weekday 14:50 AlphaFeed depth snapshot (live-execution layer dataset).
+    """Weekday 14:40 AlphaFeed depth snapshot (live-execution layer dataset).
 
     Depth has no history, so this only accumulates a forward dataset — it does
-    not touch the shadow ledger or any backtest number.
+    not touch the shadow ledger or any backtest number. Runs 10 minutes before
+    the 14:50 preclose order decision so the two never contend.
     """
     try:
         proc = quant_manager.run_project_command("python scripts/collect_depth.py", timeout=600)
@@ -734,7 +793,9 @@ def start_scheduler() -> None:
             )
             scheduler.add_job(
                 collect_depth_daily,
-                CronTrigger(day_of_week="mon-fri", hour=14, minute=50),
+                # 14:40, NOT 14:50: the preclose order layer owns 14:50 and must
+                # not be delayed by (or race) the depth snapshot.
+                CronTrigger(day_of_week="mon-fri", hour=14, minute=40),
                 id=DEPTH_JOB_ID, replace_existing=True,
                 misfire_grace_time=3600, coalesce=True,
             )
@@ -782,6 +843,174 @@ def start_scheduler() -> None:
         logger.exception("scheduler catch-up check failed")
 
 
+# --------------------------------------------------------------------------- #
+# job catalog (panel 「任务调度」 card)
+# --------------------------------------------------------------------------- #
+#: Static schedule table — ``(job id, display name, cron label)`` in the order
+#: the panel renders them. It is the fallback when the in-process scheduler is
+#: not running (e.g. the backend was just started, or the scheduler failed to
+#: start): the card must still list every job with its planned time, just with
+#: ``next_run = None``. ``get_status`` overrides ``cron`` / ``next_run`` with the
+#: live APScheduler values whenever the scheduler is up.
+#:
+#: The plan times mirror ``start_scheduler``'s ``CronTrigger`` arguments. Note
+#: the weekday daily loop is *D-only* (autopilot/shadow over ``D_5W``) and the
+#: Saturday/Sunday jobs are the D-cycle cost audit / monthly model cycle.
+_JOB_SPECS: tuple[tuple[str, str, str], ...] = (
+    (LIVE_JOB_ID, "实时模拟盘（09:25 启动）", "mon-fri 09:25"),
+    (DEPTH_JOB_ID, "深度快照采集（14:40）", "mon-fri 14:40"),
+    (PRECLOSE_JOB_ID, "收盘竞价委托（14:50）", "mon-fri 14:50"),
+    (INTRA_JOB_ID, "盘中特征刷新（15:02）", "mon-fri 15:02"),
+    (SHADOW_JOB_ID, "影子盘日报（15:10）", "mon-fri 15:10"),
+    (CHALLENGER_JOB_ID, "D 轨挑战者（17:45）", "mon-fri 17:45"),
+    (CALIBRATE_JOB_ID, "成本模型一致性检查（周六 18:00）", "sat 18:00"),
+    (WEEKLY_JOB_ID, "D 轨模型月度循环（周日 18:00）", "sun 18:00"),
+)
+
+
+def _job_catalog() -> list[dict[str, Any]]:
+    """Return the static job table (pure: no settings, scheduler or I/O).
+
+    Every entry carries the full panel schema so a caller never has to guess:
+    ``{id, name, cron, next_run, last_run, last_status}``. ``next_run`` /
+    ``last_run`` / ``last_status`` are ``None`` here — :func:`_job_entries`
+    fills them from the live scheduler and the in-memory run records.
+    """
+    return [
+        {
+            "id": job_id,
+            "name": name,
+            "cron": cron,
+            "next_run": None,
+            "last_run": None,
+            "last_status": None,
+        }
+        for job_id, name, cron in _JOB_SPECS
+    ]
+
+
+def _run_time(record: dict[str, Any] | None) -> str | None:
+    """Best-effort run timestamp of a ``_last_*_run`` record (``None`` if absent)."""
+    if not isinstance(record, dict):
+        return None
+    for key in ("ts", "last_run", "timestamp", "finished_at", "started_at"):
+        value = record.get(key)
+        if isinstance(value, (int, float)):
+            return datetime.fromtimestamp(float(value)).isoformat(timespec="seconds")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _run_status(record: dict[str, Any] | None) -> str | None:
+    """Map a run record to ``ok`` / ``failed``; ``None`` when it carries neither.
+
+    ``ok`` wins (it is the job's own verdict); otherwise ``returncode == 0``.
+    A record with neither is left ``None`` so the panel shows「—」instead of
+    inventing a status.
+    """
+    if not isinstance(record, dict):
+        return None
+    ok = record.get("ok")
+    if isinstance(ok, bool):
+        return "ok" if ok else "failed"
+    returncode = record.get("returncode")
+    if isinstance(returncode, int):
+        return "ok" if returncode == 0 else "failed"
+    return None
+
+
+def _latest_record(*records: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Pick the newest of the candidate run records by their own timestamp.
+
+    The daily slot runs ``autopilot`` *or* ``shadow`` depending on
+    ``quant_autopilot_enabled``, and either can also be triggered manually from
+    the panel — so both records are considered and the newer one wins.
+    """
+    best: dict[str, Any] | None = None
+    best_ts: str | None = None
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        ts = _run_time(record)
+        if ts is None:
+            if best is None:
+                best = record
+            continue
+        if best_ts is None or ts > best_ts:
+            best, best_ts = record, ts
+    return best
+
+
+def _iso_time(value: Any) -> str | None:
+    """ISO seconds string for a ``datetime`` (local wall clock), else ``None``."""
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is not None:
+        value = value.replace(tzinfo=None)
+    return value.isoformat(timespec="seconds")
+
+
+def _trigger_cron(trigger: Any) -> str | None:
+    """Render a live APScheduler trigger as ``"mon-fri 09:25"``.
+
+    Falls back to ``str(trigger)`` for a non-cron trigger, and to ``None`` when
+    the trigger is missing/unreadable (the caller then keeps the static label).
+    """
+    if trigger is None:
+        return None
+    values: dict[str, str] = {}
+    for field in getattr(trigger, "fields", None) or ():
+        name = getattr(field, "name", None)
+        if name:
+            values[str(name)] = str(field)
+    if not values:
+        return str(trigger) or None
+    day_of_week = values.get("day_of_week", "*")
+    hour = values.get("hour", "*")
+    minute = values.get("minute", "*")
+    if hour.isdigit() and minute.isdigit():
+        return f"{day_of_week} {int(hour):02d}:{int(minute):02d}"
+    return f"{day_of_week} {hour}:{minute}"
+
+
+def _job_entries() -> list[dict[str, Any]]:
+    """Merge the static catalog with the live scheduler + run records."""
+    entries = _job_catalog()
+    by_id = {entry["id"]: entry for entry in entries}
+
+    # last_run / last_status from the in-memory records of the jobs that keep
+    # one. The other jobs (live/preclose/depth/intraday/challenger) only write
+    # the operation log, so they stay None and the panel shows「—」.
+    for job_id, record in (
+        (SHADOW_JOB_ID, _latest_record(_last_autopilot_run, _last_shadow_run)),
+        (CALIBRATE_JOB_ID, _last_calibration_run),
+        (WEEKLY_JOB_ID, _last_weekly_run),
+    ):
+        entry = by_id.get(job_id)
+        if entry is None:
+            continue
+        entry["last_run"] = _run_time(record)
+        entry["last_status"] = _run_status(record)
+
+    scheduler = _scheduler
+    if scheduler is not None:
+        try:
+            jobs = list(scheduler.get_jobs())
+        except Exception:  # noqa: BLE001 — a dead scheduler must not break the panel
+            logger.warning("scheduler.get_jobs() failed; falling back to the static table")
+            jobs = []
+        for job in jobs:
+            entry = by_id.get(str(getattr(job, "id", "")))
+            if entry is None:
+                continue
+            cron = _trigger_cron(getattr(job, "trigger", None))
+            if cron:
+                entry["cron"] = cron
+            entry["next_run"] = _iso_time(getattr(job, "next_run_time", None))
+    return entries
+
+
 def get_status() -> dict[str, Any]:
     dh, dm = _parse_hhmm(settings.get("quant_shadow_daily_time"), (17, 30))
     ch, cm = _parse_hhmm(settings.get("quant_calibrate_time"), (18, 0))
@@ -797,4 +1026,7 @@ def get_status() -> dict[str, Any]:
         "last_calibration_run": _last_calibration_run,
         "last_autopilot_run": _last_autopilot_run,
         "last_weekly_run": _last_weekly_run,
+        # Full job list for the panel's 「任务调度」 card: 8 rows even when the
+        # scheduler is down (static plan times, next_run=None).
+        "jobs": _job_entries(),
     }

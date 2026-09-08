@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import threading
 import time
@@ -195,10 +196,12 @@ def save_report_to_kb(title: str, text: str) -> dict[str, Any]:
 # Red-line status
 # --------------------------------------------------------------------------- #
 def get_status() -> dict[str, Any]:
-    """Return the dual-track red-line status: one entry per shadow account plus
+    """Return the D-track red-line status: one entry per shadow account plus
     an aggregate ``overall`` severity (worst across accounts).
 
-    The red lines come from the FQA shadow-mode runs
+    Only the D track remains (``D_5W``); the A/B/C ML cross-section accounts
+    retired on 2026-09-08, so this normally holds a single entry. The red lines
+    come from the FQA shadow-mode runs
     (``outputs/shadow_status_<name>.json``), which carry each line's own
     ``label`` / ``level`` / ``threshold`` / ``critical``. Before the first shadow
     run there is no status yet: report every line with ``level="unknown"`` and
@@ -266,7 +269,7 @@ def get_status() -> dict[str, Any]:
         "overall": overall,
         "accounts": accounts,
         "red_lines": accounts[first]["red_lines"],
-        "source": "dual-account shadow",
+        "source": "D-track shadow",
     }
 
 
@@ -1000,8 +1003,8 @@ def read_autopilot_state() -> dict[str, Any] | None:
 
 def read_autopilot_states() -> dict[str, Any]:
     """Per-account autopilot states: ``{name: state}`` from
-    ``outputs/autopilot_state_<name>.json`` (dual-track), falling back to the
-    legacy single-account ``outputs/autopilot_state.json``.
+    ``outputs/autopilot_state_<name>.json`` (D track only since 2026-09-08),
+    falling back to the legacy single-account ``outputs/autopilot_state.json``.
     """
     root = Path(_project_root())
     names = _shadow_account_names()
@@ -1018,7 +1021,11 @@ def read_autopilot_states() -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
-# Dual-capital accounts (A_200W / B_10W) — per-account status + trade records
+# Shadow accounts — per-account status + trade records.
+# Historical note: this used to serve the multi-capital tracks
+# (A_200W / B_10W / C_5W). Those ML cross-section tracks retired 2026-09-08 and
+# ``shadow.accounts`` now lists only ``D_5W`` (alpha_source: pullback); the code
+# still iterates the config list, so a re-added account would surface again.
 # --------------------------------------------------------------------------- #
 def _shadow_account_names() -> list[str]:
     """Account names from ``shadow.accounts`` in the master config (fallback: legacy).
@@ -1082,7 +1089,10 @@ def read_trade_records(account: str = "", limit: int = 200, date: str | None = N
     import sqlite3
 
     root = Path(_project_root())
-    suffix = f"_{account}" if account else ""
+    name = str(account or "").strip()
+    if name and not _ACCOUNT_NAME_RE.match(name):
+        raise ValueError(f"invalid account name: {name!r}")
+    suffix = f"_{name}" if name else ""
     ledger = root / f"outputs/shadow_ledger{suffix}.sqlite"
     if not ledger.is_file():
         return {"account": account, "fills": [], "days": [], "note": "ledger not found"}
@@ -1154,16 +1164,97 @@ def read_live_status(account: str = "") -> dict[str, Any] | None:
     P&L refreshed at every poll — never backfilled from past timestamps.
     """
     root = Path(_project_root())
-    name = str(account or "").strip()
-    if not name:
-        cfg = _load_yaml(root / "configs" / "master_config.yaml")
-        live_cfg = cfg.get("live") if isinstance(cfg, dict) else None
-        live_cfg = live_cfg if isinstance(live_cfg, dict) else {}
-        name = str(live_cfg.get("account") or "D_5W")
+    name = _live_account_name(root, account)
+    if not _ACCOUNT_NAME_RE.match(name):
+        raise ValueError(f"invalid account name: {name!r}")
     data = _read_output_json(root, (f"outputs/live_{name}.json",))
     if data is not None:
         data.setdefault("account", name)
     return data
+
+
+#: Account names accepted by the per-account output readers. FQA account names
+#: are plain identifiers (``D_5W``); anything else is rejected so a caller cannot
+#: escape ``outputs/`` with ``../`` or an absolute path.
+_ACCOUNT_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+
+def _live_account_name(root: Path, account: str = "") -> str:
+    """Resolve an account name: the explicit argument, else ``live.account``.
+
+    ``live.account`` defaults to ``D_5W`` — the only track left after the
+    2026-09-08 A/B/C retirement.
+    """
+    name = str(account or "").strip()
+    if name:
+        return name
+    cfg = _load_yaml(root / "configs" / "master_config.yaml")
+    live_cfg = cfg.get("live") if isinstance(cfg, dict) else None
+    live_cfg = live_cfg if isinstance(live_cfg, dict) else {}
+    return str(live_cfg.get("account") or "D_5W")
+
+
+def _preclose_age_minutes(date_value: Any, ts_value: Any, path: Path) -> int | None:
+    """Minutes since the order list was decided (``None`` when undeterminable).
+
+    Uses the payload's own ``date`` + ``ts``; falls back to the file mtime when
+    the decision timestamp is missing/unparsable. Never negative.
+    """
+    candidates: list[str] = []
+    if isinstance(date_value, str) and date_value.strip():
+        date_txt = date_value.strip()
+        if isinstance(ts_value, str) and ts_value.strip():
+            candidates.append(f"{date_txt} {ts_value.strip()}")
+        candidates.append(date_txt)
+    for candidate in candidates:
+        try:
+            decided = datetime.fromisoformat(candidate)
+        except ValueError:
+            continue
+        return max(0, int(round((datetime.now() - decided).total_seconds() / 60.0)))
+    try:
+        return max(0, int(round((time.time() - path.stat().st_mtime) / 60.0)))
+    except OSError:
+        return None
+
+
+def read_preclose_orders(account: str = "") -> dict[str, Any] | None:
+    """Read FQA's ``outputs/preclose_orders_<account>.json`` (D-track 14:50 list).
+
+    ``cli.py preclose`` decides the closing-auction order list from 14:50-known
+    data (provisional minute bars + T-1 ranks) and persists it; the 15:00 auction
+    close then fills exactly that list. These are **simulated** decisions on the
+    D shadow book — not broker orders.
+
+    ``account`` "" resolves to ``live.account`` (default ``D_5W``); the name must
+    match ``[A-Za-z0-9_]+`` (raises ``ValueError`` otherwise, so a caller cannot
+    traverse out of ``outputs/``). Returns ``None`` when the file does not exist
+    (the router maps that to 404); raises :class:`OutputCorruptError` when it
+    exists but cannot be parsed.
+
+    Two derived fields make the freshness explicit for the panel: ``stale``
+    (the payload's ``date`` is not today — a historical list must never be read
+    as today's) and ``age_minutes`` (minutes since the decision timestamp).
+    """
+    root = Path(_project_root())
+    name = _live_account_name(root, account)
+    if not _ACCOUNT_NAME_RE.match(name):
+        raise ValueError(f"invalid account name: {name!r}")
+    path = root / "outputs" / f"preclose_orders_{name}.json"
+    if not path.is_file():
+        return None
+    data = _parse_json_file(path)
+    if not isinstance(data, dict):
+        raise OutputCorruptError(f"FQA output 损坏或不可读: {path.name}")
+    orders = data.get("orders")
+    return {
+        "date": data.get("date"),
+        "ts": data.get("ts"),
+        "orders": orders if isinstance(orders, list) else [],
+        "note": str(data.get("note") or ""),
+        "stale": str(data.get("date") or "") != datetime.now().strftime("%Y-%m-%d"),
+        "age_minutes": _preclose_age_minutes(data.get("date"), data.get("ts"), path),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -1352,7 +1443,8 @@ def redline_history(limit: int = 200, account: str = "") -> list[dict[str, Any]]
     """Return the latest ``limit`` persisted red-line snapshots for ``account``,
     oldest first.
 
-    ``account`` "" returns the legacy pre-dual-track rows. A subquery first grabs
+    ``account`` "" returns the legacy rows written before the single-D-track
+    convergence. A subquery first grabs
     the newest ``limit`` rows (by ts desc), then the outer sort flips them back to
     ascending for trend charts.
     """
