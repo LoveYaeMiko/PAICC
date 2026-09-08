@@ -25,11 +25,15 @@ interface AccountStatus {
 interface LivePosition {
   symbol: string
   shares: number
-  last: number
+  last: number | null
   entry?: number | null
   stop?: number | null
   pnl?: number | null
   pnl_pct?: number | null
+  /** why this position was skipped this cycle (stale quote / limit-down / no print) */
+  blocked?: string | null
+  /** minute timestamp of the print the P&L was marked at */
+  quote_ts?: string | null
 }
 
 interface LiveStatus {
@@ -39,6 +43,9 @@ interface LiveStatus {
   cash?: number
   invested_pct?: number
   positions?: LivePosition[]
+  /** per-symbol skip reasons from the current poll */
+  blocked?: Record<string, string>
+  decision_window?: string
 }
 
 /** 14:50 pre-close order list (``outputs/preclose_orders_<account>.json``). */
@@ -249,6 +256,18 @@ const livePositionColumns: TableColumnsType<LivePosition> = [
     align: 'right',
     render: (v: number | null) =>
       v == null ? '—' : <span style={{ color: pnlColor(v) }}>{`${v.toFixed(2)}%`}</span>,
+  },
+  {
+    title: '行情/状态',
+    key: 'state',
+    render: (_v: unknown, r: LivePosition) =>
+      r.blocked ? (
+        <Tag color="orange">{r.blocked}</Tag>
+      ) : (
+        <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+          {r.quote_ts ? `成交价 ${r.quote_ts}` : '—'}
+        </Typography.Text>
+      ),
   },
 ]
 
