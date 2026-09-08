@@ -235,6 +235,13 @@ class StatusWithLiveSchedulerTest(unittest.TestCase):
         self.assertEqual(qs._run_status({"ok": False, "returncode": 0}), "failed")
         self.assertEqual(qs._run_status({"returncode": 0}), "ok")
         self.assertEqual(qs._run_status({"returncode": 2}), "failed")
+
+    def test_run_status_reports_skipped(self):
+        # A gated-off job returns ok=True + skipped=...; it must NOT read 成功.
+        self.assertEqual(
+            qs._run_status({"ok": True, "skipped": "D 轨模型自优化循环未启用"}), "skipped"
+        )
+        self.assertEqual(qs._run_status({"ok": True}), "ok")
         self.assertIsNone(qs._run_status({}))
         self.assertIsNone(qs._run_status(None))
 

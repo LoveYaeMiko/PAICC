@@ -906,14 +906,18 @@ def _run_time(record: dict[str, Any] | None) -> str | None:
 
 
 def _run_status(record: dict[str, Any] | None) -> str | None:
-    """Map a run record to ``ok`` / ``failed``; ``None`` when it carries neither.
+    """Map a run record to ``ok`` / ``skipped`` / ``failed``.
 
-    ``ok`` wins (it is the job's own verdict); otherwise ``returncode == 0``.
-    A record with neither is left ``None`` so the panel shows「—」instead of
-    inventing a status.
+    A job that returns ``{"ok": True, "skipped": ...}`` did NOT run — it must
+    not be shown as 成功 (e.g. the D model-cycle jobs are intentionally gated
+    off by ``quant_d_cycle_enabled=false``, see docs/D_MODEL_CYCLE.md §四).
+    ``ok`` wins over ``returncode``; a record carrying neither stays ``None``
+    so the panel shows「—」instead of inventing a status.
     """
     if not isinstance(record, dict):
         return None
+    if record.get("skipped"):
+        return "skipped"
     ok = record.get("ok")
     if isinstance(ok, bool):
         return "ok" if ok else "failed"
