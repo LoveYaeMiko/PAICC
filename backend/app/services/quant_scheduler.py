@@ -99,7 +99,8 @@ def start_live_trader() -> dict[str, Any]:
     """Weekday 09:25 — launch the FQA real-time intraday trader (detached).
 
     ``python cli.py live`` polls the latest minute print and executes D-track
-    stop breaches at the actual moment; it self-exits at 15:10 and a pid lock
+    stop breaches at the actual moment; its decision window ends at 15:00 (the
+    closing auction belongs to the 14:50 preclose order layer) and a pid lock
     makes double-starts no-ops. The PIT store is ensured FIRST — ``cli.py live``
     hard-exits on an unreachable PIT DB, so this job launches Docker Desktop
     itself and RETRIES every 45s (Docker cold starts after a long idle can take
@@ -730,8 +731,10 @@ def _fire_missed_today_jobs() -> None:
     # trader for the remaining session. ``cli.py live`` is idempotent via its
     # pid lock and only ever reads CURRENT prints, so a resume never trades a
     # past timestamp — fully compliant with the D-track live discipline. The
-    # PIT ensure inside start_live_trader self-heals Docker as well.
-    if now.weekday() < 5 and (9, 30) <= (now.hour, now.minute) < (15, 10):
+    # PIT ensure inside start_live_trader self-heals Docker as well. The window
+    # ends at 15:00 like the trader's own decision window (15:00+ is the
+    # closing-auction layer's job).
+    if now.weekday() < 5 and (9, 30) <= (now.hour, now.minute) < (15, 0):
         db.log_operation(
             "quant_live_resume", {"date": now.strftime("%Y-%m-%d")}, {"launched": True}
         )
