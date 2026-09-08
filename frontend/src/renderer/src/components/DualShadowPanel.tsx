@@ -400,7 +400,15 @@ function AccountTab({ account }: { account: AccountStatus }): JSX.Element {
           title={
             <Space size={8}>
               <span>盘中实时（逐分钟）</span>
-              <Tag color="processing">实时</Tag>
+              {(() => {
+                const staleMs = Date.now() - new Date((live.ts ?? '').replace(' ', 'T')).getTime()
+                const stale = Number.isNaN(staleMs) || staleMs > 10 * 60 * 1000
+                return stale ? (
+                  <Tag color="default">非实时（休市/离线）</Tag>
+                ) : (
+                  <Tag color="processing">实时</Tag>
+                )
+              })()}
               <Typography.Text type="secondary" style={{ fontSize: 11 }}>
                 更新于 {live.ts ?? '—'}
               </Typography.Text>
