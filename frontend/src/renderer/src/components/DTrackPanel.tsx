@@ -110,6 +110,22 @@ function formatPrice(v: number | null | undefined): string {
   return v.toFixed(2)
 }
 
+/** Provenance labels for the fill-source line (defect D-4 transparency). */
+const SOURCE_LABEL: Record<string, string> = {
+  live: '实时执行',
+  replay: '分钟回放',
+  close: '收盘调仓',
+  auction: '收盘竞价',
+  unlabelled: '未标注(旧数据)'
+}
+
+function formatSources(bySource: Record<string, number>): string {
+  return Object.entries(bySource)
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `${SOURCE_LABEL[k] ?? k} ${v} 笔`)
+    .join(' · ')
+}
+
 function pnlColor(v: number | null | undefined): string | undefined {
   if (v == null) return undefined
   return v >= 0 ? '#ff4d4f' : '#52c41a'
@@ -722,6 +738,12 @@ export default function DTrackPanel({ refreshKey = 0 }: Props): JSX.Element {
             <Statistic title="期末现金" value={eq.final_cash ?? 0} precision={2} />
           </Col>
         </Row>
+        {Object.keys(eq.fills_by_source ?? {}).length ? (
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            成交来源：{formatSources(eq.fills_by_source ?? {})}
+            （实时执行 = 交易者当场成交；分钟回放 / 收盘调仓 / 收盘竞价 均为模拟撮合）
+          </Typography.Text>
+        ) : null}
       </Card>
 
       {equitySeries.length ? (

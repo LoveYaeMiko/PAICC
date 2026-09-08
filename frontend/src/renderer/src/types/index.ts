@@ -196,6 +196,8 @@ export interface ShadowEquity {
   n_days: number
   n_fills: number
   total_commission: number
+  /** Fill counts by provenance (live / replay / close / auction) — D-4. */
+  fills_by_source?: Record<string, number>
 }
 
 export interface ShadowPosition {
