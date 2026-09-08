@@ -806,11 +806,11 @@ _DOCKER_DESKTOP_EXE = r"C:\Program Files\Docker\Docker\Docker Desktop.exe"
 _PIT_CONTAINER = "fqa-pit-db"
 
 #: Stage budget (seconds): daemon wait / compose up / container-health wait.
-_DOCKER_DAEMON_WAIT = 120
+_DOCKER_DAEMON_WAIT = 240
 _DOCKER_COMPOSE_TIMEOUT = 120
 _DOCKER_COMPOSE_RETRIES = 3
 _DOCKER_COMPOSE_RETRY_DELAY = 5
-_PIT_HEALTH_WAIT = 60
+_PIT_HEALTH_WAIT = 120
 
 
 def _run_docker(args: list[str], cwd: str | None = None, timeout: int = 60) -> subprocess.CompletedProcess | None:

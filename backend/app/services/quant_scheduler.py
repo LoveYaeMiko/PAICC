@@ -52,22 +52,33 @@ def run_preclose_daily() -> dict[str, Any]:
     refused: orders decided AFTER the auction would trade on information a
     real 14:57 order could not have had.
     """
-    try:
+    import time as _time
+
+    now = datetime.now()
+    if not ((14, 40) <= (now.hour, now.minute) <= (15, 10)):
+        return {"ok": True, "skipped": f"outside 14:40-15:10 ({now:%H:%M}) — no retroactive orders"}
+    last_err = ""
+    while True:
+        try:
+            proc = _ensure_pit_db_or_fail() or quant_manager.run_project_command(
+                "python cli.py preclose", timeout=900
+            )
+            ok = proc.get("returncode") == 0
+            db.log_operation(
+                "quant_preclose", {},
+                {"ok": ok, "tail": (proc.get("stdout") or "")[-300:]},
+            )
+            return {"ok": ok}
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("preclose order layer failed")
+            last_err = f"{type(exc).__name__}: {exc}"
+        # retry while a fresh attempt can still FETCH before the 15:00
+        # auction (the CLI takes ~5-8 min); stop by 14:56 otherwise.
         now = datetime.now()
-        if not ((14, 40) <= (now.hour, now.minute) <= (15, 10)):
-            return {"ok": True, "skipped": f"outside 14:40-15:10 ({now:%H:%M}) — no retroactive orders"}
-        proc = _ensure_pit_db_or_fail() or quant_manager.run_project_command(
-            "python cli.py preclose", timeout=900
-        )
-        ok = proc.get("returncode") == 0
-        db.log_operation(
-            "quant_preclose", {},
-            {"ok": ok, "tail": (proc.get("stdout") or "")[-300:]},
-        )
-        return {"ok": ok}
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("preclose order layer failed")
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        if not (now.hour == 14 and now.minute <= 56):
+            db.log_operation("quant_preclose", {}, {"ok": False, "error": last_err})
+            return {"ok": False, "error": last_err}
+        _time.sleep(30)
 
 
 def start_live_trader() -> dict[str, Any]:
@@ -77,21 +88,35 @@ def start_live_trader() -> dict[str, Any]:
     stop breaches at the actual moment; it self-exits at 15:10 and a pid lock
     makes double-starts no-ops. The PIT store is ensured FIRST — ``cli.py live``
     hard-exits on an unreachable PIT DB, so this job launches Docker Desktop
-    itself instead of silently missing the whole session (2026-09-04 check:
-    this was the one scheduled task without PIT self-heal).
+    itself and RETRIES every 45s (Docker cold starts after a long idle can take
+    minutes; on 2026-09-08 the single 09:26 attempt gave up mid-daemon-start and
+    the whole morning session was lost). Every retry is forward-only, so the
+    no-past-timestamp discipline holds regardless of when it succeeds.
     """
-    try:
-        pit_fail = _ensure_pit_db_or_fail()
-        if pit_fail is not None:
-            err = str(pit_fail.get("stderr", ""))[-200:]
-            db.log_operation("quant_live_start", {}, {"ok": False, "error": err})
-            return {"ok": False, "error": err}
-        proc = quant_manager.run_command(command="python cli.py live")
-        db.log_operation("quant_live_start", {}, {"pid": proc.get("pid")})
-        return {"ok": True, "pid": proc.get("pid")}
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("live trader launch failed")
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    import time as _time
+
+    last_err = ""
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            pit_fail = _ensure_pit_db_or_fail()
+            if pit_fail is not None:
+                last_err = str(pit_fail.get("stderr", ""))[-200:]
+            else:
+                proc = quant_manager.run_command(command="python cli.py live")
+                db.log_operation("quant_live_start", {}, {"pid": proc.get("pid")})
+                return {"ok": True, "pid": proc.get("pid")}
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("live trader launch failed")
+            last_err = f"{type(exc).__name__}: {exc}"
+        now = datetime.now()
+        morning_retry_ok = now.hour == 9 and now.minute < 56
+        midday_retry_ok = now.hour >= 10 and attempts < 3
+        if not (morning_retry_ok or midday_retry_ok):
+            db.log_operation("quant_live_start", {}, {"ok": False, "error": last_err})
+            return {"ok": False, "error": last_err}
+        _time.sleep(45)
 
 
 def refresh_intraday_daily_job() -> dict[str, Any]:
