@@ -180,6 +180,9 @@ _last_shadow_run: dict[str, Any] | None = None
 _last_calibration_run: dict[str, Any] | None = None
 _last_autopilot_run: dict[str, Any] | None = None
 _last_weekly_run: dict[str, Any] | None = None
+#: Per-job last result for the jobs that previously only wrote the operation log
+#: (live / depth / preclose / intraday / challenger / watchdog).
+_last_job_runs: dict[str, dict[str, Any]] = {}
 
 
 # --------------------------------------------------------------------------- #
@@ -205,6 +208,19 @@ def _stamp(result: dict[str, Any]) -> dict[str, Any]:
     """
     result.setdefault("ts", datetime.now().isoformat(timespec="seconds"))
     return result
+
+
+def _recording(job_id: str, fn):
+    """Wrap a job so its result is remembered for the panel's job table."""
+
+    def _wrapped():
+        result = fn()
+        if isinstance(result, dict):
+            _last_job_runs[job_id] = dict(result)
+        return result
+
+    _wrapped.__name__ = getattr(fn, "__name__", job_id)
+    return _wrapped
 
 
 def _quant_root() -> Path:
@@ -832,7 +848,7 @@ def start_scheduler() -> None:
                 misfire_grace_time=86400, coalesce=True,
             )
             scheduler.add_job(
-                collect_depth_daily,
+                _recording(DEPTH_JOB_ID, collect_depth_daily),
                 # 14:40, NOT 14:50: the preclose order layer owns 14:50 and must
                 # not be delayed by (or race) the depth snapshot.
                 CronTrigger(day_of_week="mon-fri", hour=14, minute=40),
@@ -840,19 +856,19 @@ def start_scheduler() -> None:
                 misfire_grace_time=3600, coalesce=True,
             )
             scheduler.add_job(
-                start_live_trader,
+                _recording(LIVE_JOB_ID, start_live_trader),
                 CronTrigger(day_of_week="mon-fri", hour=9, minute=25),
                 id=LIVE_JOB_ID, replace_existing=True,
                 misfire_grace_time=3600, coalesce=True,
             )
             scheduler.add_job(
-                refresh_intraday_daily_job,
+                _recording(INTRA_JOB_ID, refresh_intraday_daily_job),
                 CronTrigger(day_of_week="mon-fri", hour=15, minute=2),
                 id=INTRA_JOB_ID, replace_existing=True,
                 misfire_grace_time=3600, coalesce=True,
             )
             scheduler.add_job(
-                run_preclose_daily,
+                _recording(PRECLOSE_JOB_ID, run_preclose_daily),
                 CronTrigger(day_of_week="mon-fri", hour=14, minute=50),
                 id=PRECLOSE_JOB_ID, replace_existing=True,
                 # no long grace: a late preclose is refused by the time guard
@@ -860,7 +876,7 @@ def start_scheduler() -> None:
                 misfire_grace_time=60, coalesce=True,
             )
             scheduler.add_job(
-                run_d_challenger_daily,
+                _recording(CHALLENGER_JOB_ID, run_d_challenger_daily),
                 CronTrigger(day_of_week="mon-fri", hour=17, minute=45),
                 id=CHALLENGER_JOB_ID, replace_existing=True,
                 misfire_grace_time=3600, coalesce=True,
@@ -869,7 +885,7 @@ def start_scheduler() -> None:
             # trader if it died mid-session. The job itself is a no-op outside a
             # session or on a holiday.
             scheduler.add_job(
-                live_watchdog,
+                _recording(WATCHDOG_JOB_ID, live_watchdog),
                 IntervalTrigger(minutes=5),
                 id=WATCHDOG_JOB_ID, replace_existing=True,
                 misfire_grace_time=120, coalesce=True,
@@ -1033,13 +1049,20 @@ def _job_entries() -> list[dict[str, Any]]:
     entries = _job_catalog()
     by_id = {entry["id"]: entry for entry in entries}
 
-    # last_run / last_status from the in-memory records of the jobs that keep
-    # one. The other jobs (live/preclose/depth/intraday/challenger) only write
-    # the operation log, so they stay None and the panel shows「—」.
+    # last_run / last_status from the in-memory records. Jobs that only write the
+    # operation log record their own result in ``_last_job_runs`` so the panel's
+    # 「任务调度」 card is not permanently「—」for live/depth/preclose/intraday/
+    # challenger/watchdog (2026-09-09 audit).
     for job_id, record in (
         (SHADOW_JOB_ID, _latest_record(_last_autopilot_run, _last_shadow_run)),
         (CALIBRATE_JOB_ID, _last_calibration_run),
         (WEEKLY_JOB_ID, _last_weekly_run),
+        (LIVE_JOB_ID, _last_job_runs.get(LIVE_JOB_ID)),
+        (DEPTH_JOB_ID, _last_job_runs.get(DEPTH_JOB_ID)),
+        (PRECLOSE_JOB_ID, _last_job_runs.get(PRECLOSE_JOB_ID)),
+        (INTRA_JOB_ID, _last_job_runs.get(INTRA_JOB_ID)),
+        (CHALLENGER_JOB_ID, _last_job_runs.get(CHALLENGER_JOB_ID)),
+        (WATCHDOG_JOB_ID, _last_job_runs.get(WATCHDOG_JOB_ID)),
     ):
         entry = by_id.get(job_id)
         if entry is None:
