@@ -767,17 +767,17 @@ def live_watchdog() -> dict[str, Any]:
     """
     now = datetime.now()
     if not is_trading_day(now):
-        return {"ok": True, "skipped": "not a trading day"}
+        return _stamp({"ok": True, "skipped": "not a trading day"})
     in_session = (9, 30) <= (now.hour, now.minute) < (11, 30) or (13, 0) <= (now.hour, now.minute) < (15, 0)
     if not in_session:
-        return {"ok": True, "skipped": f"outside session ({now:%H:%M})"}
+        return _stamp({"ok": True, "skipped": f"outside session ({now:%H:%M})"})
     if quant_manager.live_trader_alive():
-        return {"ok": True, "alive": True}
+        return _stamp({"ok": True, "alive": True})
     logger.warning("live trader not alive at %s — relaunching", now.strftime("%H:%M:%S"))
     db.log_operation("quant_live_watchdog", {"date": now.strftime("%Y-%m-%d")},
                      {"alive": False, "action": "relaunch"})
     result = start_live_trader()
-    return {"ok": bool(result.get("ok")), "alive": False, "relaunch": result}
+    return _stamp({"ok": bool(result.get("ok")), "alive": False, "relaunch": result})
 
 
 def collect_depth_daily() -> dict[str, Any]:

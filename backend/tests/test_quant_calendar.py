@@ -60,7 +60,9 @@ class LiveWatchdogTest(unittest.TestCase):
              mock.patch.object(qs.quant_manager, "live_trader_alive", lambda: True):
             fake_dt.now.return_value = datetime(2026, 9, 9, 10, 30, 0)
             out = qs.live_watchdog()
-        self.assertEqual(out, {"ok": True, "alive": True})
+        assert out["ok"] is True
+        assert out["alive"] is True
+        assert out.get("ts")  # stamped so the panel can show last_run
 
     def test_dead_trader_is_relaunched(self):
         launch = mock.MagicMock(return_value={"ok": True, "pid": 1234})
