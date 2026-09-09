@@ -37,10 +37,11 @@ from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from app import db, ws
 from app.config import settings
-from app.services import mailer, quant_manager
+from app.services import mailer, quant_manager, trading_calendar
 from app.services.llm_client import LLMClient
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,14 @@ LIVE_JOB_ID = "quant_live_start"
 INTRA_JOB_ID = "quant_intraday_refresh"
 CHALLENGER_JOB_ID = "quant_d_challenger"
 PRECLOSE_JOB_ID = "quant_preclose"
+WATCHDOG_JOB_ID = "quant_live_watchdog"
+
+
+def is_trading_day(now: datetime | None = None) -> bool:
+    """Weekday AND not an exchange holiday (see trading_calendar)."""
+    return trading_calendar.is_trading_day(
+        now or datetime.now(), settings.get("quant_holidays", "")
+    )
 
 
 def run_preclose_daily() -> dict[str, Any]:
@@ -69,8 +78,12 @@ def run_preclose_daily() -> dict[str, Any]:
     import time as _time
 
     now = datetime.now()
-    if not ((14, 40) <= (now.hour, now.minute) <= (15, 10)):
-        return {"ok": True, "skipped": f"outside 14:40-15:10 ({now:%H:%M}) — no retroactive orders"}
+    if not is_trading_day(now):
+        return {"ok": True, "skipped": f"not a trading day ({now:%Y-%m-%d}) — no orders"}
+    # 14:56 hard stop (audit finding): a run started after that cannot fetch and
+    # submit before the 15:00 auction, and the FQA time guard only warns.
+    if not ((14, 40) <= (now.hour, now.minute) <= (14, 56)):
+        return {"ok": True, "skipped": f"outside 14:40-14:56 ({now:%H:%M}) — no retroactive orders"}
     last_err = ""
     while True:
         try:
@@ -112,6 +125,8 @@ def start_live_trader() -> dict[str, Any]:
 
     last_err = ""
     attempts = 0
+    if not is_trading_day():
+        return {"ok": True, "skipped": "not a trading day — live trader not started"}
     while True:
         attempts += 1
         try:
@@ -684,7 +699,7 @@ def _fire_missed_today_jobs() -> None:
         threading.Thread(target=job, daemon=True, name=f"quant-catchup-{marker_action}").start()
         logger.info("catch-up: missed %s fired", marker_action)
 
-    if now.weekday() < 5 and (now.hour, now.minute) >= (dh, dm):
+    if is_trading_day(now) and (now.hour, now.minute) >= (dh, dm):
         fire_once(
             "quant_catchup_daily",
             ("quant_autopilot_run", "quant_shadow_run", "quant_catchup_daily"),
@@ -695,20 +710,20 @@ def _fire_missed_today_jobs() -> None:
     # already-closed data. The preclose layer is deliberately NOT caught up —
     # its own time guard refuses to decide orders after the auction window
     # (never trade a past timestamp).
-    if now.weekday() < 5 and (now.hour, now.minute) >= (15, 2):
+    if is_trading_day(now) and (now.hour, now.minute) >= (15, 2):
         fire_once(
             "quant_catchup_intraday",
             ("quant_intraday_refresh", "quant_catchup_intraday"),
             refresh_intraday_daily_job,
         )
-    if now.weekday() < 5 and (now.hour, now.minute) >= (17, 45):
+    if is_trading_day(now) and (now.hour, now.minute) >= (17, 45):
         fire_once(
             "quant_catchup_challenger",
             ("quant_d_challenger", "quant_catchup_challenger"),
             run_d_challenger_daily,
         )
     # Depth is a LIVE intraday snapshot: only meaningful before the close.
-    if now.weekday() < 5 and (14, 40) <= (now.hour, now.minute) < (15, 10):
+    if is_trading_day(now) and (14, 40) <= (now.hour, now.minute) < (15, 10):
         fire_once(
             "quant_catchup_depth",
             ("quant_depth_snapshot", "quant_catchup_depth"),
@@ -726,21 +741,43 @@ def _fire_missed_today_jobs() -> None:
             ("quant_weekly_run", "quant_catchup_weekly"),
             run_weekly_cycle,
         )
-    # Forward-only live resume: whenever the backend (re)starts DURING trading
-    # hours (computer reboot / app restart / backend crash), launch the live
-    # trader for the remaining session. ``cli.py live`` is idempotent via its
-    # pid lock and only ever reads CURRENT prints, so a resume never trades a
-    # past timestamp — fully compliant with the D-track live discipline. The
-    # PIT ensure inside start_live_trader self-heals Docker as well. The window
-    # ends at 15:00 like the trader's own decision window (15:00+ is the
-    # closing-auction layer's job).
-    if now.weekday() < 5 and (9, 30) <= (now.hour, now.minute) < (15, 0):
+    # Forward-only live resume: whenever the backend (re)starts DURING a trading
+    # session (computer reboot / app restart / backend crash), launch the live
+    # trader for the remainder. ``cli.py live`` is idempotent via its pid lock and
+    # only ever reads CURRENT prints, so a resume never trades a past timestamp.
+    # The window mirrors the trader's own sessions — the 11:30-13:00 lunch break
+    # is excluded (a 12:00 restart used to start a trader that just slept).
+    in_session = (9, 30) <= (now.hour, now.minute) < (11, 30) or (13, 0) <= (now.hour, now.minute) < (15, 0)
+    if is_trading_day(now) and in_session:
         db.log_operation(
             "quant_live_resume", {"date": now.strftime("%Y-%m-%d")}, {"launched": True}
         )
         threading.Thread(
             target=start_live_trader, daemon=True, name="quant-live-resume"
         ).start()
+
+
+def live_watchdog() -> dict[str, Any]:
+    """Every 5 minutes — relaunch the live trader if it died mid-session.
+
+    Before this, a crashed trader was only noticed when the backend itself
+    restarted (audit P-4: the "watchdog" in quant_manager is a log-file tailer,
+    not a process monitor). The check is forward-only: the relaunched trader
+    reads current prints and never back-fills a missed bar.
+    """
+    now = datetime.now()
+    if not is_trading_day(now):
+        return {"ok": True, "skipped": "not a trading day"}
+    in_session = (9, 30) <= (now.hour, now.minute) < (11, 30) or (13, 0) <= (now.hour, now.minute) < (15, 0)
+    if not in_session:
+        return {"ok": True, "skipped": f"outside session ({now:%H:%M})"}
+    if quant_manager.live_trader_alive():
+        return {"ok": True, "alive": True}
+    logger.warning("live trader not alive at %s — relaunching", now.strftime("%H:%M:%S"))
+    db.log_operation("quant_live_watchdog", {"date": now.strftime("%Y-%m-%d")},
+                     {"alive": False, "action": "relaunch"})
+    result = start_live_trader()
+    return {"ok": bool(result.get("ok")), "alive": False, "relaunch": result}
 
 
 def collect_depth_daily() -> dict[str, Any]:
@@ -828,6 +865,15 @@ def start_scheduler() -> None:
                 id=CHALLENGER_JOB_ID, replace_existing=True,
                 misfire_grace_time=3600, coalesce=True,
             )
+            # Live-trader watchdog (audit P-4): every 5 minutes, relaunch the
+            # trader if it died mid-session. The job itself is a no-op outside a
+            # session or on a holiday.
+            scheduler.add_job(
+                live_watchdog,
+                IntervalTrigger(minutes=5),
+                id=WATCHDOG_JOB_ID, replace_existing=True,
+                misfire_grace_time=120, coalesce=True,
+            )
             scheduler.start()
             _scheduler = scheduler
             _started = True
@@ -866,6 +912,7 @@ _JOB_SPECS: tuple[tuple[str, str, str], ...] = (
     (INTRA_JOB_ID, "盘中特征刷新（15:02）", "mon-fri 15:02"),
     (SHADOW_JOB_ID, "影子盘日报（15:10）", "mon-fri 15:10"),
     (CHALLENGER_JOB_ID, "D 轨挑战者（17:45）", "mon-fri 17:45"),
+    (WATCHDOG_JOB_ID, "实时盘看门狗（每 5 分钟）", "every 5m"),
     (CALIBRATE_JOB_ID, "成本模型一致性检查（周六 18:00）", "sat 18:00"),
     (WEEKLY_JOB_ID, "D 轨模型月度循环（周日 18:00）", "sun 18:00"),
 )

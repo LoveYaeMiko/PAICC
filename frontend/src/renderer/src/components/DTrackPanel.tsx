@@ -281,7 +281,7 @@ const livePositionColumns: TableColumnsType<LivePosition> = [
         <Tag color="orange">{r.blocked}</Tag>
       ) : (
         <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-          {r.quote_ts ? `成交价 ${r.quote_ts}` : '—'}
+          {r.quote_ts ? `成交时刻 ${r.quote_ts}` : '—'}
         </Typography.Text>
       ),
   },

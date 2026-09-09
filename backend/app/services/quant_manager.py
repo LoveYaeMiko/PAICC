@@ -629,12 +629,13 @@ def tail_log(lines: int = 100) -> list[str]:
     return [line.rstrip("\n") for line in content[-lines:]]
 
 
-def stop_command(project_id: int | None = None) -> dict[str, Any]:
+def stop_command(project_id: int | None = None, force: bool = False) -> dict[str, Any]:
     """Terminate tracked quant processes (optionally scoped to one project).
 
     Each tracked PID is terminated (then killed after a timeout) together with its
-    child process tree. Returns the PIDs that were successfully stopped and any that
-    could not be.
+    child process tree. The real-time trader is PROTECTED unless ``force=True``:
+    killing it mid-session leaves the D track unmonitored (the watchdog would
+    relaunch it within 5 minutes, but the operator should say so explicitly).
     """
     with _tracked_lock:
         targets = [
@@ -645,8 +646,13 @@ def stop_command(project_id: int | None = None) -> dict[str, Any]:
 
     stopped: list[int] = []
     errors: list[int] = []
+    protected: list[int] = []
     for info in targets:
         pid = info["pid"]
+        cmd = str(info.get("command", "")).lower()
+        if not force and "cli.py" in cmd and " live" in cmd:
+            protected.append(pid)
+            continue
         (stopped if _terminate_process_tree(pid) else errors).append(pid)
 
     with _tracked_lock:
@@ -657,10 +663,10 @@ def stop_command(project_id: int | None = None) -> dict[str, Any]:
         publish("log_line", {"file": "command", "line": f"stopped processes: {stopped}", "level": "info"})
     db.log_operation(
         "quant_stop_command",
-        {"project_id": project_id},
-        {"stopped": stopped, "errors": errors},
+        {"project_id": project_id, "force": force},
+        {"stopped": stopped, "errors": errors, "protected_live_trader": protected},
     )
-    return {"stopped": stopped, "errors": errors}
+    return {"stopped": stopped, "errors": errors, "protected_live_trader": protected}
 
 
 def _terminate_process_tree(pid: int) -> bool:
@@ -1153,6 +1159,38 @@ def read_trade_records(account: str = "", limit: int = 200, date: str | None = N
         return {"account": account or "default", "fills": fills, "days": [dict(r) for r in days]}
     finally:
         con.close()
+
+
+def live_trader_alive() -> bool:
+    """True when the FQA real-time trader process is running (audit P-4).
+
+    Reads ``outputs/live_<account>.pid`` and validates the command line — a
+    recycled pid must not look like a live trader. Used by the scheduler's
+    watchdog to relaunch a trader that died mid-session.
+    """
+    root = Path(_project_root())
+    name = _live_account_name(root, "")
+    pid_file = root / "outputs" / f"live_{name}.pid"
+    if not pid_file.is_file():
+        return False
+    try:
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return False
+    try:
+        import psutil
+    except ImportError:
+        try:
+            os.kill(pid, 0)  # noqa: S101 — existence probe only
+            return True
+        except OSError:
+            return False
+    try:
+        proc = psutil.Process(pid)
+        cmd = " ".join(proc.cmdline()).lower()
+        return "cli.py" in cmd and "live" in cmd.split()
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        return False
 
 
 def read_live_status(account: str = "") -> dict[str, Any] | None:

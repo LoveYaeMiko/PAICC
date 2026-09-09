@@ -46,6 +46,13 @@ DEFAULTS: dict[str, Any] = {
     # instead of the legacy 17:30 evening slot.
     "quant_shadow_daily_time": "15:10",
     "quant_calibrate_time": "18:00",
+    # Sunday D-model monthly-cycle time. This key was missing from DEFAULTS, so
+    # the job silently used a hardcoded 18:00 (audit finding).
+    "quant_weekly_time": "18:00",
+    # Exchange holiday overrides (comma-separated ISO dates). trading_calendar
+    # already carries the 2026 closures observed in the benchmark calendar; add
+    # the remainder of the year here from the exchange notice.
+    "quant_holidays": "",
     "quant_shadow_auto_email": "true",
     # Drive the daily job with FQA's end-to-end autopilot closed loop
     # (shadow → kill-switch risk gate → periodic §7 re-calibration → factor-decay

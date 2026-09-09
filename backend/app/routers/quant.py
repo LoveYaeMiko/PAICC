@@ -37,6 +37,9 @@ class RunCommandRequest(BaseModel):
 class StopCommandRequest(BaseModel):
     project_id: int | None = None
     confirmation_id: str | None = None
+    #: The real-time trader is protected by default: stopping it mid-session
+    #: leaves the D track unmonitored until the watchdog relaunches it.
+    force: bool = False
 
 
 class SaveConfigRequest(BaseModel):
@@ -125,7 +128,7 @@ def run_command(payload: RunCommandRequest) -> dict[str, Any]:
 @router.post("/stop")
 def stop_command(payload: StopCommandRequest) -> dict[str, Any]:
     require_confirmation(payload.confirmation_id, action="stop_quant_command")
-    return quant_manager.stop_command(project_id=payload.project_id)
+    return quant_manager.stop_command(project_id=payload.project_id, force=payload.force)
 
 
 @router.get("/config")
