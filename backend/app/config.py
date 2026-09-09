@@ -64,6 +64,13 @@ DEFAULTS: dict[str, Any] = {
     # evidence experiment (scripts/d_model_cycle_eval.py) shows a positive
     # out-of-sample effect.
     "quant_d_cycle_enabled": "false",
+    # Forward-period layer (docs/FORWARD_PROTOCOL.md in FQA):
+    #   quant_forward_enabled  — advance the atr_1p0_25_40 candidate shadow daily
+    #                            (isolated ledger, paired comparison, record only)
+    #   quant_forward_health_time — weekly risk-gate evaluation (replay tracking
+    #                            error + cost + availability + coverage)
+    "quant_forward_enabled": "true",
+    "quant_forward_health_time": "18:30",
     # LLM
     "llm_provider": "deepseek",
     "llm_model": "deepseek-chat",

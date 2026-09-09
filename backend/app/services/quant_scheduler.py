@@ -55,6 +55,8 @@ INTRA_JOB_ID = "quant_intraday_refresh"
 CHALLENGER_JOB_ID = "quant_d_challenger"
 PRECLOSE_JOB_ID = "quant_preclose"
 WATCHDOG_JOB_ID = "quant_live_watchdog"
+FORWARD_CANDIDATE_JOB_ID = "quant_forward_candidate"
+FORWARD_HEALTH_JOB_ID = "quant_forward_health"
 
 
 def is_trading_day(now: datetime | None = None) -> bool:
@@ -548,6 +550,64 @@ def run_weekly_cycle() -> dict[str, Any]:
     return result
 
 
+def run_forward_candidate_daily() -> dict[str, Any]:
+    """Weekday 15:20 — advance the forward-period candidate shadow.
+
+    Isolated ledger (``outputs/forward/candidate_atr_1p0_25_40/``), same data /
+    code / execution regime as production, ONE difference (stop width), record
+    only — no auto-switch. See FQA ``docs/FORWARD_PROTOCOL.md`` §2.
+    """
+    try:
+        if not settings.get_bool("quant_forward_enabled", True):
+            return {"ok": True, "skipped": "前向候选未启用（quant_forward_enabled=false）"}
+        proc = _ensure_pit_db_or_fail() or quant_manager.run_project_command(
+            "python scripts/forward_candidate.py daily", timeout=3600
+        )
+        ok = proc.get("returncode") == 0
+        db.log_operation(
+            "quant_forward_candidate", {},
+            {"ok": ok, "tail": (proc.get("stdout") or "")[-200:]},
+        )
+        return {"ok": ok}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("forward candidate run failed")
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def run_forward_health() -> dict[str, Any]:
+    """Saturday — evaluate the forward RISK gate (not a capability gate).
+
+    ``scripts/forward_health.py`` exits 0 when every hard gate passes and 1 when
+    one fails; both are VALID results (a failed gate is information, not a job
+    error), so the job reports ``ok`` for either and surfaces the verdict.
+    """
+    try:
+        proc = _ensure_pit_db_or_fail() or quant_manager.run_project_command(
+            "python scripts/forward_health.py", timeout=7200
+        )
+        rc = proc.get("returncode")
+        verdict = None
+        try:
+            root = Path(settings.get("quant_root", ""))
+            artifact = quant_manager._read_output_json(  # noqa: SLF001 — same package helper
+                root, ("outputs/forward/forward_health.json",)
+            )
+            if isinstance(artifact, dict):
+                verdict = (artifact.get("gate") or {}).get("verdict")
+        except Exception:  # noqa: BLE001 — a missing/corrupt artifact must not fail the job
+            verdict = None
+        ok = rc in (0, 1)
+        db.log_operation(
+            "quant_forward_health", {},
+            {"ok": ok, "returncode": rc, "verdict": verdict,
+             "tail": (proc.get("stdout") or "")[-200:]},
+        )
+        return {"ok": ok, "verdict": verdict, "returncode": rc}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("forward health run failed")
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
 def run_d_challenger_daily() -> dict[str, Any]:
     """Weekday 17:45 — advance the D-track model challenger (parallel shadow).
 
@@ -890,6 +950,25 @@ def start_scheduler() -> None:
                 id=WATCHDOG_JOB_ID, replace_existing=True,
                 misfire_grace_time=120, coalesce=True,
             )
+            # Forward-period candidate shadow (FQA docs/FORWARD_PROTOCOL.md §2):
+            # 15:20, after the 15:10 daily loop has settled the production book, so
+            # both ledgers are advanced on the same data and the paired comparison
+            # stays apples-to-apples.
+            scheduler.add_job(
+                _recording(FORWARD_CANDIDATE_JOB_ID, run_forward_candidate_daily),
+                CronTrigger(day_of_week="mon-fri", hour=15, minute=20),
+                id=FORWARD_CANDIDATE_JOB_ID, replace_existing=True,
+                misfire_grace_time=3600, coalesce=True,
+            )
+            # Forward RISK gate (§1.3): weekly, with the replay-based tracking
+            # error. Exit 1 = a hard gate failed, which is a RESULT, not an error.
+            fh, fm = _parse_hhmm(settings.get("quant_forward_health_time"), (18, 30))
+            scheduler.add_job(
+                _recording(FORWARD_HEALTH_JOB_ID, run_forward_health),
+                CronTrigger(day_of_week="sat", hour=fh, minute=fm),
+                id=FORWARD_HEALTH_JOB_ID, replace_existing=True,
+                misfire_grace_time=86400, coalesce=True,
+            )
             scheduler.start()
             _scheduler = scheduler
             _started = True
@@ -928,7 +1007,9 @@ _JOB_SPECS: tuple[tuple[str, str, str], ...] = (
     (INTRA_JOB_ID, "盘中特征刷新（15:02）", "mon-fri 15:02"),
     (SHADOW_JOB_ID, "影子盘日报（15:10）", "mon-fri 15:10"),
     (CHALLENGER_JOB_ID, "D 轨挑战者（17:45）", "mon-fri 17:45"),
+    (FORWARD_CANDIDATE_JOB_ID, "前向候选影子盘（15:20）", "mon-fri 15:20"),
     (WATCHDOG_JOB_ID, "实时盘看门狗（每 5 分钟）", "every 5m"),
+    (FORWARD_HEALTH_JOB_ID, "前向风险闸门（周六 18:30）", "sat 18:30"),
     (CALIBRATE_JOB_ID, "成本模型一致性检查（周六 18:00）", "sat 18:00"),
     (WEEKLY_JOB_ID, "D 轨模型月度循环（周日 18:00）", "sun 18:00"),
 )
@@ -1062,6 +1143,8 @@ def _job_entries() -> list[dict[str, Any]]:
         (PRECLOSE_JOB_ID, _last_job_runs.get(PRECLOSE_JOB_ID)),
         (INTRA_JOB_ID, _last_job_runs.get(INTRA_JOB_ID)),
         (CHALLENGER_JOB_ID, _last_job_runs.get(CHALLENGER_JOB_ID)),
+        (FORWARD_CANDIDATE_JOB_ID, _last_job_runs.get(FORWARD_CANDIDATE_JOB_ID)),
+        (FORWARD_HEALTH_JOB_ID, _last_job_runs.get(FORWARD_HEALTH_JOB_ID)),
         (WATCHDOG_JOB_ID, _last_job_runs.get(WATCHDOG_JOB_ID)),
     ):
         entry = by_id.get(job_id)

@@ -28,7 +28,9 @@ EXPECTED_CRON = {
     "quant_intraday_refresh": "mon-fri 15:02",
     "quant_shadow_daily": "mon-fri 15:10",
     "quant_d_challenger": "mon-fri 17:45",
+    "quant_forward_candidate": "mon-fri 15:20",
     "quant_live_watchdog": "every 5m",
+    "quant_forward_health": "sat 18:30",
     "quant_calibrate": "sat 18:00",
     "quant_weekly_cycle": "sun 18:00",
 }
@@ -39,6 +41,7 @@ _SETTING_DEFAULTS = {
     "quant_shadow_daily_time": "15:10",
     "quant_calibrate_time": "18:00",
     "quant_weekly_time": "18:00",
+    "quant_forward_health_time": "18:30",
     "quant_shadow_auto_email": "true",
     "quant_autopilot_enabled": "true",
 }
@@ -72,7 +75,7 @@ class _BrokenScheduler:
 class JobCatalogTest(unittest.TestCase):
     def test_static_catalog_is_complete_and_pure(self):
         jobs = qs._job_catalog()
-        self.assertEqual(len(jobs), 9)
+        self.assertEqual(len(jobs), 11)
         self.assertEqual([job["id"] for job in jobs], list(EXPECTED_CRON))
         for job in jobs:
             self.assertEqual(set(job), REQUIRED_KEYS)
@@ -88,7 +91,7 @@ class JobCatalogTest(unittest.TestCase):
         first.append({"id": "junk"})
         second = qs._job_catalog()
         self.assertEqual(second[0]["cron"], EXPECTED_CRON["quant_live_start"])
-        self.assertEqual(len(second), 9)
+        self.assertEqual(len(second), 11)
 
 
 class StatusWithoutSchedulerTest(unittest.TestCase):
@@ -109,7 +112,7 @@ class StatusWithoutSchedulerTest(unittest.TestCase):
         status = qs.get_status()
         self.assertFalse(status["scheduler_running"])
         jobs = status["jobs"]
-        self.assertEqual(len(jobs), 9)
+        self.assertEqual(len(jobs), 11)
         for job in jobs:
             self.assertEqual(set(job), REQUIRED_KEYS)
             self.assertEqual(job["cron"], EXPECTED_CRON[job["id"]])
@@ -176,7 +179,7 @@ class StatusWithLiveSchedulerTest(unittest.TestCase):
         status = qs.get_status()
         self.assertTrue(status["scheduler_running"])
         by_id = {job["id"]: job for job in status["jobs"]}
-        self.assertEqual(len(status["jobs"]), 9)
+        self.assertEqual(len(status["jobs"]), 11)
         self.assertEqual(by_id["quant_live_start"]["cron"], "mon-fri 09:25")
         self.assertEqual(by_id["quant_live_start"]["next_run"], "2026-09-09T09:25:00")
         self.assertEqual(by_id["quant_shadow_daily"]["cron"], "mon-fri 16:05")
@@ -203,7 +206,7 @@ class StatusWithLiveSchedulerTest(unittest.TestCase):
     def test_broken_scheduler_falls_back_to_static_table(self):
         self._install(_BrokenScheduler())
         jobs = qs.get_status()["jobs"]
-        self.assertEqual(len(jobs), 9)
+        self.assertEqual(len(jobs), 11)
         for job in jobs:
             self.assertEqual(job["cron"], EXPECTED_CRON[job["id"]])
             self.assertIsNone(job["next_run"])
