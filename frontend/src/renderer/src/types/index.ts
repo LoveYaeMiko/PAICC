@@ -380,6 +380,107 @@ export interface QuantScheduleStatus {
   jobs?: QuantScheduleJob[]
 }
 
+/** One hard/soft gate entry from the forward RISK gate artifact. */
+export interface ForwardGateCheck {
+  ok: boolean
+  value?: number | null
+  value_pct?: number | null
+  value_days?: number | null
+  mean_abs_bps?: number | null
+  max?: number | null
+  min?: number | null
+  min_days?: number | null
+  max_days?: number | null
+  max_pct?: number | null
+  limit_bps?: number | null
+  n_days?: number | null
+  n_excluded?: number | null
+  n_price_checked?: number | null
+  n_price_skipped?: number | null
+  unmeasured?: string[]
+  n_pos?: number | null
+  n_neg?: number | null
+}
+
+export interface ForwardHealthGate {
+  hard: Record<string, ForwardGateCheck>
+  soft: { record_only: string[]; values: Record<string, number | null>; note: string }
+  failed: string[]
+  verdict: string
+  thresholds: Record<string, number>
+}
+
+/** ``/quant/forward`` → ``health`` (the risk gate artifact). */
+export interface ForwardHealth {
+  account: string
+  window: { start: string; end: string }
+  n_fills: number
+  n_days: number
+  artifact?: string
+  fills_by_source?: Record<string, number>
+  gate: ForwardHealthGate
+  metrics: {
+    tracking_error: Record<string, number | string | null | string[]>
+    cost: Record<string, number | string | null | string[] | Record<string, unknown>>
+    violations: Record<string, number | string[] | unknown[]>
+    availability: Record<string, number | string | boolean | null>
+    data_freshness: Record<string, number | string | null>
+    symbol_coverage: Record<string, number | string[] | null>
+    soft: Record<string, number | null>
+  }
+  provenance?: Record<string, unknown>
+  prereg?: { rule_id: string; frozen_at: string; record_sha256: string } | null
+}
+
+/** ``/quant/forward`` → ``paired`` (candidate vs incumbent, record only). */
+export interface ForwardPaired {
+  artifact?: string
+  provenance?: Record<string, unknown>
+  paired: {
+    rule_id: string
+    n_days: number
+    ready: boolean
+    window_days: number
+    t_min: number
+    diff_gt: number
+    verdict: string
+    switch: boolean
+    corr: number | null
+    mean_diff_pp: number | null
+    cum_diff_pp: number | null
+    annualized_diff_pp: number | null
+    t_stat: number | null
+    hit_rate: number | null
+    days_needed_for_t: number | null
+    paired_from?: string | null
+    seed_cutoff?: string | null
+    paired_note?: string
+    reason?: string
+    note?: string
+    candidate_params: Record<string, number>
+    incumbent: string
+  }
+}
+
+export interface ForwardPrereg {
+  rule_id: string
+  version: number
+  frozen_at: string
+  record_sha256: string
+  code_commit?: string
+  scope?: Record<string, unknown>
+  trials?: { family?: string; this_trial?: number; prior_trials?: number }
+  artifact?: string
+}
+
+export interface ForwardState {
+  health: ForwardHealth | null
+  paired: ForwardPaired | null
+  prereg: ForwardPrereg[]
+  gate_verdict: string | null
+  candidate_verdict: string | null
+}
+
 export interface AutopilotState {
   mode: string
   gross_scale: number | null

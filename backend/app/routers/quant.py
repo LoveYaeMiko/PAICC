@@ -242,6 +242,21 @@ def redline_history(limit: int = 200, account: str = "") -> list[dict[str, Any]]
     return quant_manager.redline_history(limit, account=account)
 
 
+@router.get("/forward")
+def forward_state() -> dict[str, Any]:
+    """Forward-period layer: RISK gate verdict, candidate paired comparison, prereg.
+
+    The forward window does not test alpha (no power — see FQA
+    ``docs/FORWARD_PROTOCOL.md``); it tests the pipeline: tracking error, cost
+    calibration, violations, availability, freshness, coverage. ``gate_verdict``
+    is ``pass``/``fail``/``None`` (never evaluated); an unmeasured gate fails.
+    """
+    try:
+        return quant_manager.read_forward()
+    except quant_manager.OutputCorruptError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @router.post("/shadow/run")
 def run_shadow(payload: RunShadowRequest) -> dict[str, Any]:
     """Trigger the shadow-mode daily run in the background (confirmed)."""

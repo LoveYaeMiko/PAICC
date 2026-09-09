@@ -1217,6 +1217,86 @@ def read_live_status(account: str = "") -> dict[str, Any] | None:
 _ACCOUNT_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
 
+def _newest_output(root: Path, pattern: str) -> tuple[dict[str, Any], str] | None:
+    """Newest JSON matching ``pattern`` under the FQA root → ``(payload, relpath)``.
+
+    ``None`` when nothing matches; a corrupt file raises so the panel can tell
+    "never ran" apart from "output is broken".
+    """
+    hits = sorted(root.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
+    for path in hits:
+        data = _parse_json_file(path)
+        if isinstance(data, dict):
+            return data, str(path.relative_to(root)).replace("\\", "/")
+        raise OutputCorruptError(f"FQA output 损坏或不可读: {path.name}")
+    return None
+
+
+def read_forward_health() -> dict[str, Any] | None:
+    """Newest forward-period RISK gate artifact (``outputs/forward/forward_health*.json``).
+
+    ``None`` means the gate has never been evaluated. The payload carries the
+    hard/soft verdict, the measured metrics (tracking error, cost, violations,
+    availability, freshness, coverage) and the provenance block.
+    """
+    hit = _newest_output(Path(_project_root()), "outputs/forward/forward_health*.json")
+    if hit is None:
+        return None
+    data, rel = hit
+    data.setdefault("artifact", rel)
+    return data
+
+
+def read_forward_paired() -> dict[str, Any] | None:
+    """Newest forward-candidate PAIRED comparison (``outputs/forward/paired_*.json``).
+
+    Record-only: the payload states the pre-registered switch rule and whether
+    the candidate currently warrants a switch (``verdict`` = switch | hold).
+    """
+    hit = _newest_output(Path(_project_root()), "outputs/forward/paired_*.json")
+    if hit is None:
+        return None
+    data, rel = hit
+    data.setdefault("artifact", rel)
+    return data
+
+
+def read_forward_prereg() -> list[dict[str, Any]]:
+    """All pre-registration records (append-only, newest ``frozen_at`` first).
+
+    A record that cannot be parsed is LISTED with ``error: unreadable`` rather
+    than dropped: silently omitting it would hide the fact that a rule was
+    frozen (and possibly superseded) from the panel.
+    """
+    root = Path(_project_root())
+    out: list[dict[str, Any]] = []
+    for path in sorted(root.glob("outputs/forward/prereg/prereg_*.json")):
+        data = _parse_json_file(path)
+        if not isinstance(data, dict):
+            out.append({"rule_id": path.stem, "error": "unreadable"})
+            continue
+        data.setdefault("artifact", str(path.relative_to(root)).replace("\\", "/"))
+        out.append(data)
+    out.sort(key=lambda r: str(r.get("frozen_at", "")), reverse=True)
+    return out
+
+
+def read_forward() -> dict[str, Any]:
+    """Forward-period bundle for the panel: gate + candidate + pre-registrations."""
+    health = read_forward_health()
+    paired = read_forward_paired()
+    # the paired artifact nests its result under ``paired`` (provenance is a
+    # sibling key), so the verdict lookup has to go one level down
+    paired_result = (paired or {}).get("paired") or {}
+    return {
+        "health": health,
+        "paired": paired,
+        "prereg": read_forward_prereg(),
+        "gate_verdict": ((health or {}).get("gate") or {}).get("verdict"),
+        "candidate_verdict": paired_result.get("verdict"),
+    }
+
+
 def _live_account_name(root: Path, account: str = "") -> str:
     """Resolve an account name: the explicit argument, else ``live.account``.
 

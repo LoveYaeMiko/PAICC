@@ -25,6 +25,7 @@ import dayjs from 'dayjs'
 import type { EChartsOption } from 'echarts'
 import EChart from '@/components/EChart'
 import DTrackPanel from '@/components/DTrackPanel'
+import ForwardPanel from '@/components/ForwardPanel'
 import { api } from '@/services/api'
 import { confirmOperation } from '@/services/confirm'
 import { useWsEvent } from '@/services/ws'
@@ -502,6 +503,8 @@ export default function QuantPage(): JSX.Element {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <DTrackPanel refreshKey={panelKey} />
+
+      <ForwardPanel />
 
       <Card
         title="任务调度"
