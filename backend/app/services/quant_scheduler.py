@@ -56,6 +56,7 @@ CHALLENGER_JOB_ID = "quant_d_challenger"
 PRECLOSE_JOB_ID = "quant_preclose"
 WATCHDOG_JOB_ID = "quant_live_watchdog"
 FORWARD_CANDIDATE_JOB_ID = "quant_forward_candidate"
+FORWARD_SAMPLE_JOB_ID = "quant_forward_sample"
 FORWARD_HEALTH_JOB_ID = "quant_forward_health"
 
 
@@ -574,6 +575,47 @@ def run_forward_candidate_daily() -> dict[str, Any]:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
+def _forward_catchup_sequence() -> None:
+    """Run the three forward jobs in order (catch-up entry point).
+
+    Sequential by construction: ``run_forward_candidate_daily`` and
+    ``run_forward_health`` each build a market slice, so running them from three
+    catch-up threads at once would exhaust memory. Each step is idempotent and
+    each failure is logged, never propagated — a failed gate must not skip the
+    sample append of the next day.
+    """
+    for step in (run_forward_candidate_daily, run_forward_sample, run_forward_health):
+        try:
+            result = step()
+            logger.info("forward catch-up %s → %s", step.__name__, result)
+        except Exception:  # noqa: BLE001
+            logger.exception("forward catch-up step %s failed", step.__name__)
+
+
+def run_forward_sample() -> dict[str, Any]:
+    """Weekday 15:35 — append today's row to the forward sample (append-only).
+
+    Cheap and separate from the gate on purpose: the sample must survive a gate
+    crash. A day that was NOT produced under the frozen convention is appended
+    with ``convention_ok: false`` (recorded, never hidden).
+    """
+    try:
+        if not settings.get_bool("quant_forward_enabled", True):
+            return {"ok": True, "skipped": "前向层未启用（quant_forward_enabled=false）"}
+        proc = _ensure_pit_db_or_fail() or quant_manager.run_project_command(
+            "python scripts/forward_sample.py", timeout=600
+        )
+        ok = proc.get("returncode") == 0
+        db.log_operation(
+            "quant_forward_sample", {},
+            {"ok": ok, "tail": (proc.get("stdout") or "")[-200:]},
+        )
+        return {"ok": ok}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("forward sample append failed")
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
 def run_forward_health() -> dict[str, Any]:
     """Weekday 15:40 — evaluate the forward RISK gate (not a capability gate).
 
@@ -841,6 +883,18 @@ def _fire_missed_today_jobs() -> None:
             ("quant_weekly_run", "quant_catchup_weekly"),
             run_weekly_cycle,
         )
+    # Forward layer (candidate 15:20 → sample 15:35 → gate 15:40), caught up as
+    # ONE sequential job on purpose: the candidate and the gate each build a
+    # market slice (~10 GB), so firing them in parallel from three catch-up
+    # threads would exhaust memory. They are all idempotent — the candidate
+    # advances every missing day, the sample is append-only, the gate replays.
+    fh, fm = _parse_hhmm(settings.get("quant_forward_health_time"), (15, 40))
+    if is_trading_day(now) and (now.hour, now.minute) >= (fh, fm):
+        fire_once(
+            "quant_catchup_forward",
+            ("quant_forward_health", "quant_catchup_forward"),
+            _forward_catchup_sequence,
+        )
     # Forward-only live resume: whenever the backend (re)starts DURING a trading
     # session (computer reboot / app restart / backend crash), launch the live
     # trader for the remainder. ``cli.py live`` is idempotent via its pid lock and
@@ -984,6 +1038,17 @@ def start_scheduler() -> None:
                 id=FORWARD_CANDIDATE_JOB_ID, replace_existing=True,
                 misfire_grace_time=3600, coalesce=True,
             )
+            # Forward sample (follow-up ③): one append-only row per forward day,
+            # at 15:35 — after the 15:20 candidate arms and before the 15:40 gate.
+            # Deliberately a SEPARATE, cheap job (seconds, no replay): the sample
+            # must survive a gate crash, and it is the raw material any later
+            # analysis uses instead of the mixed-convention production curve.
+            scheduler.add_job(
+                _recording(FORWARD_SAMPLE_JOB_ID, run_forward_sample),
+                CronTrigger(day_of_week="mon-fri", hour=15, minute=35),
+                id=FORWARD_SAMPLE_JOB_ID, replace_existing=True,
+                misfire_grace_time=86400, coalesce=True,
+            )
             # Forward RISK gate (§1.3): DAILY on weekdays, after the 15:20
             # candidate run — the gate needs ≥5 measurable days
             # (``tracking_error_min_days``) before it says anything at all, which
@@ -1036,6 +1101,7 @@ _JOB_SPECS: tuple[tuple[str, str, str], ...] = (
     (INTRA_JOB_ID, "盘中特征刷新（15:02）", "mon-fri 15:02"),
     (SHADOW_JOB_ID, "影子盘日报（15:10）", "mon-fri 15:10"),
     (FORWARD_CANDIDATE_JOB_ID, "前向候选影子盘（15:20）", "mon-fri 15:20"),
+    (FORWARD_SAMPLE_JOB_ID, "前向样本归档（15:35）", "mon-fri 15:35"),
     (FORWARD_HEALTH_JOB_ID, "前向风险闸门（15:40）", "mon-fri 15:40"),
     (CHALLENGER_JOB_ID, "D 轨挑战者（17:45）", "mon-fri 17:45"),
     (WATCHDOG_JOB_ID, "实时盘看门狗（每 5 分钟）", "every 5m"),
@@ -1173,6 +1239,7 @@ def _job_entries() -> list[dict[str, Any]]:
         (INTRA_JOB_ID, _last_job_runs.get(INTRA_JOB_ID)),
         (CHALLENGER_JOB_ID, _last_job_runs.get(CHALLENGER_JOB_ID)),
         (FORWARD_CANDIDATE_JOB_ID, _last_job_runs.get(FORWARD_CANDIDATE_JOB_ID)),
+        (FORWARD_SAMPLE_JOB_ID, _last_job_runs.get(FORWARD_SAMPLE_JOB_ID)),
         (FORWARD_HEALTH_JOB_ID, _last_job_runs.get(FORWARD_HEALTH_JOB_ID)),
         (WATCHDOG_JOB_ID, _last_job_runs.get(WATCHDOG_JOB_ID)),
     ):
