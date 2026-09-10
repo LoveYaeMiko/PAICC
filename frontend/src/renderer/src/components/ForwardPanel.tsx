@@ -66,24 +66,47 @@ function fmt(v: unknown, unit?: string): string {
   return String(v)
 }
 
+/**
+ * Integer counts / day counts.
+ *
+ * FQA emits these as JSON numbers, so ``toFixed(2)`` rendered them as
+ * 「28.00 日」/「0.00 天」 — a day count is an integer by construction.
+ */
+function fmtInt(v: unknown, unit?: string): string {
+  if (v == null) return '—'
+  const n = Number(v)
+  if (!Number.isFinite(n)) return String(v)
+  return `${Math.round(n)}${unit ?? ''}`
+}
+
+/** Percentages always carry 2 decimals (``total_return`` etc. are ratios). */
+function fmtPct(v: unknown): string {
+  if (v == null) return '—'
+  const n = Number(v)
+  return Number.isFinite(n) ? `${(n * 100).toFixed(2)}%` : String(v)
+}
+
+/** 软指标里按整数计数的字段（其余按 ``fmt`` 的 2 位小数渲染）。 */
+const SOFT_INT_KEYS = new Set(['n_days', 'n_fills'])
+
 function checkValue(key: string, c: ForwardGateCheck): string {
   switch (key) {
     case 'tracking_error_daily_pp':
-      return fmt(c.value, 'pp/日') + (c.n_days != null ? `（${c.n_days} 日）` : '')
+      return fmt(c.value, 'pp/日') + (c.n_days != null ? `（${fmtInt(c.n_days)} 日）` : '')
     case 'tracking_error_sign_bias':
-      return fmt(c.value, '') + (c.n_pos != null ? `（+${c.n_pos}/−${c.n_neg}）` : '')
+      return fmt(c.value, '') + (c.n_pos != null ? `（+${fmtInt(c.n_pos)}/−${fmtInt(c.n_neg)}）` : '')
     case 'cost_fee_deviation':
-      return fmt(c.value_pct, '%')
+      return c.value_pct == null ? '—' : `${c.value_pct.toFixed(2)}%`
     case 'cost_price_integrity':
-      return fmt(c.mean_abs_bps, 'bp') + (c.n_price_checked != null ? `（${c.n_price_checked} 笔）` : '')
+      return fmt(c.mean_abs_bps, 'bp') + (c.n_price_checked != null ? `（${fmtInt(c.n_price_checked)} 笔）` : '')
     case 'violations':
-      return fmt(c.value, '笔')
+      return fmtInt(c.value, '笔')
     case 'availability':
       return c.value == null ? '未测量' : `${(Number(c.value) * 100).toFixed(2)}%`
     case 'data_freshness':
-      return fmt(c.value_days, ' 天')
+      return fmtInt(c.value_days, ' 天')
     case 'symbol_minute_coverage':
-      return c.value == null ? '未测量' : `${(Number(c.value) * 100).toFixed(1)}%`
+      return c.value == null ? '未测量' : `${(Number(c.value) * 100).toFixed(2)}%`
     default:
       return fmt(c.value ?? c.value_pct ?? c.mean_abs_bps, '')
   }
@@ -92,9 +115,10 @@ function checkValue(key: string, c: ForwardGateCheck): string {
 function checkThreshold(key: string, c: ForwardGateCheck): string {
   switch (key) {
     case 'tracking_error_daily_pp':
-      return `≤ ${c.max} pp/日，且 ≥ ${c.min_days} 日`
+      return `≤ ${c.max} pp/日，且 ≥ ${fmtInt(c.min_days)} 日`
     case 'tracking_error_sign_bias':
-      return `p ≥ ${c.min}`
+      // FQA names this floor ``min_p`` (a binomial p-value floor), not ``min``.
+      return `p ≥ ${c.min_p ?? '—'}`
     case 'cost_fee_deviation':
       return `|偏差| ≤ ${c.max_pct}%`
     case 'cost_price_integrity':
@@ -104,7 +128,7 @@ function checkThreshold(key: string, c: ForwardGateCheck): string {
     case 'availability':
       return `≥ ${((c.min ?? 0) * 100).toFixed(0)}%`
     case 'data_freshness':
-      return `≤ ${c.max_days} 天`
+      return `≤ ${fmtInt(c.max_days)} 天`
     case 'symbol_minute_coverage':
       return `≥ ${((c.min ?? 0) * 100).toFixed(0)}%`
     default:
@@ -170,6 +194,18 @@ export default function ForwardPanel(): JSX.Element {
     (entry): entry is [string, ForwardGateCheck] => typeof entry[1] === 'object' && entry[1] !== null,
   )
   const soft = health?.gate?.soft
+  const prereg = state?.prereg ?? []
+  // One unparseable artifact must not blank the panel: the backend skips it,
+  // lists it under ``corrupt`` and keeps serving the rest.
+  const corruptFiles = Array.from(
+    new Set([...(health?.corrupt ?? []), ...(state?.paired?.corrupt ?? [])]),
+  )
+  // 试跑/非前向窗口 artifacts: the canonical file was missing, so what is shown
+  // is a hand-named shakedown copy (FQA: "pipeline shakedown only").
+  const fallbackArtifacts = [
+    health?.fallback ? (health.artifact ?? '—') : null,
+    state?.paired?.fallback ? (state?.paired?.artifact ?? '—') : null,
+  ].filter((v): v is string => Boolean(v))
 
   return (
     <Card
@@ -200,10 +236,28 @@ export default function ForwardPanel(): JSX.Element {
           type="info"
           showIcon
           message="风险闸门尚未评估"
-          description="运行 python scripts/forward_health.py（PAICC 每周六 18:30 自动执行）"
+          description="运行 python scripts/forward_health.py（PAICC 每交易日 15:40 自动执行，也可由 POST /quant/forward/run 手动触发）"
         />
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {fallbackArtifacts.length ? (
+            <Alert
+              type="warning"
+              showIcon
+              message={`非前向窗口工件：${fallbackArtifacts.join('、')}`}
+              description="找不到规范路径的工件，以下内容是回退读取的试跑/历史副本（FQA 标注为 pipeline shakedown），不代表前向窗口的判定结果。"
+            />
+          ) : null}
+
+          {corruptFiles.length ? (
+            <Alert
+              type="warning"
+              showIcon
+              message={`${corruptFiles.length} 个工件无法解析，已跳过：${corruptFiles.join('、')}`}
+              description="这些文件不会阻断其余工件（闸门/候选/预注册照常显示），但需要人工查看是否被写坏。"
+            />
+          ) : null}
+
           {health.gate.failed.length ? (
             <Alert
               type="error"
@@ -239,7 +293,7 @@ export default function ForwardPanel(): JSX.Element {
                     : ''}
                 </Descriptions.Item>
                 <Descriptions.Item label="配对日数">
-                  {paired ? `${paired.n_days} / ${paired.window_days}` : '—'}
+                  {paired ? `${fmtInt(paired.n_days)} / ${fmtInt(paired.window_days)}` : '—'}
                 </Descriptions.Item>
                 <Descriptions.Item label="日相关性">{fmt(paired?.corr)}</Descriptions.Item>
                 <Descriptions.Item label="日差均值">
@@ -247,11 +301,11 @@ export default function ForwardPanel(): JSX.Element {
                 </Descriptions.Item>
                 <Descriptions.Item label="配对 t">{fmt(paired?.t_stat)}</Descriptions.Item>
                 <Descriptions.Item label="分离所需日数">
-                  {paired?.days_needed_for_t ? `${paired.days_needed_for_t} 日` : '—'}
+                  {paired?.days_needed_for_t ? `${fmtInt(paired.days_needed_for_t)} 日` : '—'}
                 </Descriptions.Item>
                 <Descriptions.Item label="切换规则">
                   {paired
-                    ? `${paired.window_days} 个配对日：日差均值 > ${paired.diff_gt} 且 t > ${paired.t_min} → 切换`
+                    ? `${fmtInt(paired.window_days)} 个配对日：日差均值 > ${paired.diff_gt} 且 t > ${paired.t_min} → 切换`
                     : '—'}
                 </Descriptions.Item>
                 <Descriptions.Item label="结论">
@@ -270,26 +324,61 @@ export default function ForwardPanel(): JSX.Element {
                 {Object.entries(soft?.values ?? {}).map(([k, v]) => (
                   <Descriptions.Item key={k} label={SOFT_LABEL[k] ?? k}>
                     {k === 'max_drawdown' || k === 'total_return' || k === 'excess_return'
-                      ? v == null
-                        ? '—'
-                        : `${(Number(v) * 100).toFixed(2)}%`
-                      : fmt(v)}
-                  </Descriptions.Item>
-                ))}
-                {(state?.prereg ?? []).map((rec) => (
-                  <Descriptions.Item key={rec.rule_id} label={`预注册 · ${rec.trials?.family ?? ''}`}>
-                    {rec.rule_id} v{rec.version}（{rec.frozen_at?.slice(0, 10)}，
-                    trial {rec.trials?.this_trial ?? '—'}）
+                      ? fmtPct(v)
+                      : SOFT_INT_KEYS.has(k)
+                        ? fmtInt(v)
+                        : fmt(v)}
                   </Descriptions.Item>
                 ))}
               </Descriptions>
             </Col>
           </Row>
 
+          {/* Pre-registrations get their own block: they are the frozen RULES the
+              two blocks above are judged against, not another soft metric. */}
+          <Descriptions
+            size="small"
+            column={1}
+            title="预注册（冻结规则，只记录）"
+            bordered
+          >
+            {prereg.length ? (
+              prereg.map((rec) => (
+                <Descriptions.Item
+                  // a rule can be re-frozen at several versions → compound key
+                  key={`${rec.rule_id}@v${rec.version ?? '?'}#${rec.artifact ?? ''}`}
+                  label={`预注册 · ${rec.trials?.family ?? '—'}`}
+                >
+                  {rec.error ? (
+                    <Typography.Text type="warning">
+                      {rec.rule_id}：读取失败（{rec.error}）
+                    </Typography.Text>
+                  ) : (
+                    `${rec.rule_id} v${rec.version}（${rec.frozen_at?.slice(0, 10) ?? '—'}，trial ${rec.trials?.this_trial ?? '—'}）`
+                  )}
+                </Descriptions.Item>
+              ))
+            ) : (
+              <Descriptions.Item label="预注册">—</Descriptions.Item>
+            )}
+          </Descriptions>
+
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            工件：{health.artifact ?? '—'} · 成交 {health.n_fills} 笔 · 数据截止{' '}
+            工件：{health.artifact ?? '—'}
+            {health.fallback ? (
+              <Tag color="gold" style={{ marginLeft: 8 }}>
+                试跑/非前向窗口
+              </Tag>
+            ) : null}
+            {' '}· 成交 {fmtInt(health.n_fills)} 笔 · 数据截止{' '}
             {String(health.provenance?.data_as_of ?? '—')} · commit{' '}
             {String(health.provenance?.code_commit ?? '—').slice(0, 12)}
+            {health.provenance?.code_dirty ? (
+              <Tag color="orange" style={{ marginLeft: 8 }}>
+                工作区脏
+              </Tag>
+            ) : null}
+            {corruptFiles.length ? ` · 跳过损坏工件 ${corruptFiles.length} 个` : ''}
           </Typography.Text>
         </div>
       )}

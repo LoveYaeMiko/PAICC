@@ -389,6 +389,8 @@ export interface ForwardGateCheck {
   mean_abs_bps?: number | null
   max?: number | null
   min?: number | null
+  /** Sign-bias binomial p floor — FQA emits ``min_p``, NOT ``min``. */
+  min_p?: number | null
   min_days?: number | null
   max_days?: number | null
   max_pct?: number | null
@@ -417,6 +419,10 @@ export interface ForwardHealth {
   n_fills: number
   n_days: number
   artifact?: string
+  /** ``true`` when the artifact is NOT the canonical one (试跑/非前向窗口 fallback). */
+  fallback?: boolean
+  /** Candidates that existed but could not be parsed (relative paths). */
+  corrupt?: string[]
   fills_by_source?: Record<string, number>
   gate: ForwardHealthGate
   metrics: {
@@ -435,6 +441,10 @@ export interface ForwardHealth {
 /** ``/quant/forward`` → ``paired`` (candidate vs incumbent, record only). */
 export interface ForwardPaired {
   artifact?: string
+  /** ``true`` when the artifact is NOT the canonical (record-only fallback) one. */
+  fallback?: boolean
+  /** Candidates that existed but could not be parsed (relative paths). */
+  corrupt?: string[]
   provenance?: Record<string, unknown>
   paired: {
     rule_id: string
@@ -471,6 +481,8 @@ export interface ForwardPrereg {
   scope?: Record<string, unknown>
   trials?: { family?: string; this_trial?: number; prior_trials?: number }
   artifact?: string
+  /** Set by the reader when the record file could not be parsed (``unreadable``). */
+  error?: string
 }
 
 export interface ForwardState {

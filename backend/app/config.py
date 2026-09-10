@@ -67,10 +67,18 @@ DEFAULTS: dict[str, Any] = {
     # Forward-period layer (docs/FORWARD_PROTOCOL.md in FQA):
     #   quant_forward_enabled  — advance the atr_1p0_25_40 candidate shadow daily
     #                            (isolated ledger, paired comparison, record only)
-    #   quant_forward_health_time — weekly risk-gate evaluation (replay tracking
-    #                            error + cost + availability + coverage)
+    #   quant_forward_health_enabled — evaluate the risk gate at all; the switch
+    #                            exists so the daily gate can be paused without
+    #                            touching the candidate job (they accumulate
+    #                            different things: gate days vs paired days)
+    #   quant_forward_health_time — DAILY risk-gate evaluation time (replay tracking
+    #                            error + cost + availability + coverage). Daily,
+    #                            not weekly: the gate needs ≥5 measurable days to
+    #                            be meaningful, so one weekly slot could never
+    #                            accumulate them inside a forward window.
     "quant_forward_enabled": "true",
-    "quant_forward_health_time": "18:30",
+    "quant_forward_health_enabled": "true",
+    "quant_forward_health_time": "15:40",
     # LLM
     "llm_provider": "deepseek",
     "llm_model": "deepseek-chat",

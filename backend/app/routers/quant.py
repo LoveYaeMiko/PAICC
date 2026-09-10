@@ -287,3 +287,17 @@ def run_weekly(payload: RunShadowRequest) -> dict[str, Any]:
     require_confirmation(payload.confirmation_id, action="run_quant_weekly")
     task_id = task_manager.start_task("quant_weekly_run", quant_scheduler.run_weekly_cycle)
     return {"task_id": task_id, "status": "started"}
+
+
+@router.post("/forward/run")
+def run_forward(payload: RunShadowRequest) -> dict[str, Any]:
+    """Trigger the forward-period RISK gate evaluation in the background (confirmed).
+
+    The same job the weekday 15:40 slot runs (``quant_forward_health_enabled``
+    gates it) — exposed for a manual re-evaluation after fixing whatever made a
+    hard gate fail. Like the other run endpoints it returns a task id
+    immediately; the gate itself can take minutes (it replays the window).
+    """
+    require_confirmation(payload.confirmation_id, action="run_quant_forward")
+    task_id = task_manager.start_task("quant_forward_health", quant_scheduler.run_forward_health)
+    return {"task_id": task_id, "status": "started"}

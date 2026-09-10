@@ -14,6 +14,12 @@ const PROVIDER_OPTIONS = [
   { value: 'custom', label: 'custom' },
 ]
 
+/** Settings are stored as strings（``"true"``/``"false"``），so a boolean switch is a Select. */
+const ENABLED_OPTIONS = [
+  { value: 'true', label: '启用' },
+  { value: 'false', label: '禁用' },
+]
+
 const formatDate = (ts: number): string => {
   if (!ts) return '-'
   const ms = ts < 1e12 ? ts * 1000 : ts
@@ -185,6 +191,20 @@ export default function SettingsPage(): JSX.Element {
             </Form.Item>
             <Form.Item name="quant_log_dir" label="量化日志目录">
               <Input placeholder="日志目录路径" />
+            </Form.Item>
+            <Form.Item
+              name="quant_forward_enabled"
+              label="前向期候选影子盘"
+              extra="每交易日 15:20 推进 atr_1p0_25_40 候选账本（隔离账本，配对比较，仅记录不自动切换）"
+            >
+              <Select options={ENABLED_OPTIONS} />
+            </Form.Item>
+            <Form.Item
+              name="quant_forward_health_enabled"
+              label="前向期风险闸门"
+              extra="每交易日 15:40 评估风险闸门（≥5 个可测日才有意义）；关闭后候选仍照常推进"
+            >
+              <Select options={ENABLED_OPTIONS} />
             </Form.Item>
           </FieldGrid>
 

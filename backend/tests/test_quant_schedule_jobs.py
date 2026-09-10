@@ -20,17 +20,19 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app.services import quant_scheduler as qs
 
-#: id -> planned cron label (the static table's plan times).
+#: id -> planned cron label (the static table's plan times), in catalog order.
 EXPECTED_CRON = {
     "quant_live_start": "mon-fri 09:25",
     "quant_depth_snapshot": "mon-fri 14:40",  # moved off 14:50 to clear preclose
     "quant_preclose": "mon-fri 14:50",
     "quant_intraday_refresh": "mon-fri 15:02",
     "quant_shadow_daily": "mon-fri 15:10",
-    "quant_d_challenger": "mon-fri 17:45",
     "quant_forward_candidate": "mon-fri 15:20",
+    # DAILY, right after the candidate: the gate needs ≥5 measurable days
+    # (tracking_error_min_days) before it can say anything at all.
+    "quant_forward_health": "mon-fri 15:40",
+    "quant_d_challenger": "mon-fri 17:45",
     "quant_live_watchdog": "every 5m",
-    "quant_forward_health": "sat 18:30",
     "quant_calibrate": "sat 18:00",
     "quant_weekly_cycle": "sun 18:00",
 }
@@ -41,7 +43,7 @@ _SETTING_DEFAULTS = {
     "quant_shadow_daily_time": "15:10",
     "quant_calibrate_time": "18:00",
     "quant_weekly_time": "18:00",
-    "quant_forward_health_time": "18:30",
+    "quant_forward_health_time": "15:40",
     "quant_shadow_auto_email": "true",
     "quant_autopilot_enabled": "true",
 }

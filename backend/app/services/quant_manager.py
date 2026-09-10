@@ -1217,47 +1217,96 @@ def read_live_status(account: str = "") -> dict[str, Any] | None:
 _ACCOUNT_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
 
-def _newest_output(root: Path, pattern: str) -> tuple[dict[str, Any], str] | None:
-    """Newest JSON matching ``pattern`` under the FQA root → ``(payload, relpath)``.
+def _newest_output(
+    root: Path, pattern: str, canonical: str | None = None
+) -> tuple[dict[str, Any], str, bool, list[str]] | None:
+    """Read a forward-period artifact → ``(payload, relpath, fallback, corrupt)``.
 
-    ``None`` when nothing matches; a corrupt file raises so the panel can tell
-    "never ran" apart from "output is broken".
+    ``canonical`` (when given) is tried FIRST, before mtime order: FQA's
+    scheduled jobs read/write exactly that path, while the same directory also
+    holds hand-named copies (``forward_health_shakedown_20260909.json`` —
+    FQA itself labels it "not the forward window, pipeline shakedown only").
+    Picking purely by mtime would silently render such a shakedown run as the
+    real forward window. ``fallback=True`` means the payload came from a
+    non-canonical file, so the panel can label it 试跑/非前向窗口.
+
+    A file that exists but does not parse as a dict is SKIPPED — its name is
+    collected in ``corrupt`` and the next candidate is tried: one broken file
+    must not blank the whole 「前向期」 bundle (gate AND candidate AND prereg).
+    Only when EVERY candidate is corrupt does this raise
+    :class:`OutputCorruptError`; ``None`` means nothing matched (never ran).
     """
+    canonical_path = root / canonical if canonical else None
+    paths: list[Path] = []
+    if canonical_path is not None and canonical_path.is_file():
+        paths.append(canonical_path)
     hits = sorted(root.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
-    for path in hits:
+    paths.extend(path for path in hits if path != canonical_path)
+
+    corrupt: list[str] = []
+    for path in paths:
+        rel = str(path.relative_to(root)).replace("\\", "/")
         data = _parse_json_file(path)
         if isinstance(data, dict):
-            return data, str(path.relative_to(root)).replace("\\", "/")
-        raise OutputCorruptError(f"FQA output 损坏或不可读: {path.name}")
+            fallback = canonical is not None and rel != canonical
+            return data, rel, fallback, corrupt
+        corrupt.append(rel)
+    if corrupt:
+        raise OutputCorruptError(f"FQA output 损坏或不可读: {', '.join(corrupt)}")
     return None
 
 
 def read_forward_health() -> dict[str, Any] | None:
-    """Newest forward-period RISK gate artifact (``outputs/forward/forward_health*.json``).
+    """Forward-period RISK gate artifact, canonical path first.
+
+    The canonical ``outputs/forward/forward_health.json`` is what the scheduled
+    health job writes; only when it is absent (or unreadable) does the reader
+    fall back to the newest ``forward_health*.json``, flagged ``fallback=True``
+    so the panel can mark that artifact 试跑/非前向窗口. ``corrupt`` lists any
+    candidate that existed but could not be parsed, so a single broken file
+    shows a warning instead of an empty screen.
 
     ``None`` means the gate has never been evaluated. The payload carries the
     hard/soft verdict, the measured metrics (tracking error, cost, violations,
     availability, freshness, coverage) and the provenance block.
     """
-    hit = _newest_output(Path(_project_root()), "outputs/forward/forward_health*.json")
+    hit = _newest_output(
+        Path(_project_root()),
+        "outputs/forward/forward_health*.json",
+        canonical="outputs/forward/forward_health.json",
+    )
     if hit is None:
         return None
-    data, rel = hit
+    data, rel, fallback, corrupt = hit
     data.setdefault("artifact", rel)
+    data["fallback"] = fallback
+    data["corrupt"] = corrupt
     return data
 
 
 def read_forward_paired() -> dict[str, Any] | None:
-    """Newest forward-candidate PAIRED comparison (``outputs/forward/paired_*.json``).
+    """Forward-candidate PAIRED comparison, canonical path first.
+
+    Same canonical-first rule as :func:`read_forward_health`: the candidate job
+    writes ``outputs/forward/paired_atr_1p0_25_40.json``, and only a missing (or
+    unreadable) canonical file makes the reader fall back to the newest
+    ``paired_*.json`` — a stale artifact from a previous candidate must never
+    outrank the live one just because it was touched later.
 
     Record-only: the payload states the pre-registered switch rule and whether
     the candidate currently warrants a switch (``verdict`` = switch | hold).
     """
-    hit = _newest_output(Path(_project_root()), "outputs/forward/paired_*.json")
+    hit = _newest_output(
+        Path(_project_root()),
+        "outputs/forward/paired_*.json",
+        canonical="outputs/forward/paired_atr_1p0_25_40.json",
+    )
     if hit is None:
         return None
-    data, rel = hit
+    data, rel, fallback, corrupt = hit
     data.setdefault("artifact", rel)
+    data["fallback"] = fallback
+    data["corrupt"] = corrupt
     return data
 
 

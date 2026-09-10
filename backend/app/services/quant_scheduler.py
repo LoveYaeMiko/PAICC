@@ -575,34 +575,58 @@ def run_forward_candidate_daily() -> dict[str, Any]:
 
 
 def run_forward_health() -> dict[str, Any]:
-    """Saturday — evaluate the forward RISK gate (not a capability gate).
+    """Weekday 15:40 — evaluate the forward RISK gate (not a capability gate).
 
     ``scripts/forward_health.py`` exits 0 when every hard gate passes and 1 when
-    one fails; both are VALID results (a failed gate is information, not a job
-    error), so the job reports ``ok`` for either and surfaces the verdict.
+    a hard gate FAILED. Exit 1 is a valid *result* for the gate but a FAILED job:
+    a gate that did not pass must never be stored as 成功, otherwise nobody is
+    alerted and 「未测量」 silently reads as 「没问题」. So ``ok`` follows the
+    process exit code exactly (``rc == 0``), while the gate verdict + failed
+    check list are read back from the canonical
+    ``outputs/forward/forward_health.json`` and surfaced in both the returned
+    payload and the operation log. Daily (not weekly): the gate needs ≥5
+    measurable days (``tracking_error_min_days``) to say anything at all.
+
+    A missing/corrupt artifact must not crash the job — it is reported as
+    ``artifact_error`` in the payload instead.
     """
     try:
+        if not settings.get_bool("quant_forward_health_enabled", True):
+            return {"ok": True, "skipped": "前向风险闸门未启用（quant_forward_health_enabled=false）"}
         proc = _ensure_pit_db_or_fail() or quant_manager.run_project_command(
             "python scripts/forward_health.py", timeout=7200
         )
         rc = proc.get("returncode")
         verdict = None
+        failed: list[str] = []
+        artifact_error: str | None = None
         try:
             root = Path(settings.get("quant_root", ""))
             artifact = quant_manager._read_output_json(  # noqa: SLF001 — same package helper
                 root, ("outputs/forward/forward_health.json",)
             )
             if isinstance(artifact, dict):
-                verdict = (artifact.get("gate") or {}).get("verdict")
-        except Exception:  # noqa: BLE001 — a missing/corrupt artifact must not fail the job
-            verdict = None
-        ok = rc in (0, 1)
+                gate = artifact.get("gate") or {}
+                verdict = gate.get("verdict")
+                failed = [str(name) for name in (gate.get("failed") or [])]
+        except Exception as exc:  # noqa: BLE001 — a missing/corrupt artifact must not fail the job
+            artifact_error = f"{type(exc).__name__}: {exc}"
+        ok = rc == 0
+        result: dict[str, Any] = {
+            "ok": ok,
+            "verdict": verdict,
+            "failed": failed,
+            "returncode": rc,
+        }
+        if artifact_error:
+            result["artifact_error"] = artifact_error
         db.log_operation(
             "quant_forward_health", {},
-            {"ok": ok, "returncode": rc, "verdict": verdict,
+            {"ok": ok, "returncode": rc, "verdict": verdict, "failed": failed,
+             "artifact_error": artifact_error,
              "tail": (proc.get("stdout") or "")[-200:]},
         )
-        return {"ok": ok, "verdict": verdict, "returncode": rc}
+        return result
     except Exception as exc:  # noqa: BLE001
         logger.exception("forward health run failed")
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
@@ -960,13 +984,18 @@ def start_scheduler() -> None:
                 id=FORWARD_CANDIDATE_JOB_ID, replace_existing=True,
                 misfire_grace_time=3600, coalesce=True,
             )
-            # Forward RISK gate (§1.3): weekly, with the replay-based tracking
-            # error. Exit 1 = a hard gate failed, which is a RESULT, not an error.
-            fh, fm = _parse_hhmm(settings.get("quant_forward_health_time"), (18, 30))
+            # Forward RISK gate (§1.3): DAILY on weekdays, after the 15:20
+            # candidate run — the gate needs ≥5 measurable days
+            # (``tracking_error_min_days``) before it says anything at all, which
+            # a single weekly slot could never accumulate. Exit 1 (a hard gate
+            # failed) is reported as a FAILED job, not as a successful one.
+            fh, fm = _parse_hhmm(settings.get("quant_forward_health_time"), (15, 40))
             scheduler.add_job(
                 _recording(FORWARD_HEALTH_JOB_ID, run_forward_health),
-                CronTrigger(day_of_week="sat", hour=fh, minute=fm),
+                CronTrigger(day_of_week="mon-fri", hour=fh, minute=fm),
                 id=FORWARD_HEALTH_JOB_ID, replace_existing=True,
+                # a late run is harmless: the gate replays a window, it never
+                # trades a past timestamp.
                 misfire_grace_time=86400, coalesce=True,
             )
             scheduler.start()
@@ -1006,10 +1035,10 @@ _JOB_SPECS: tuple[tuple[str, str, str], ...] = (
     (PRECLOSE_JOB_ID, "收盘竞价委托（14:50）", "mon-fri 14:50"),
     (INTRA_JOB_ID, "盘中特征刷新（15:02）", "mon-fri 15:02"),
     (SHADOW_JOB_ID, "影子盘日报（15:10）", "mon-fri 15:10"),
-    (CHALLENGER_JOB_ID, "D 轨挑战者（17:45）", "mon-fri 17:45"),
     (FORWARD_CANDIDATE_JOB_ID, "前向候选影子盘（15:20）", "mon-fri 15:20"),
+    (FORWARD_HEALTH_JOB_ID, "前向风险闸门（15:40）", "mon-fri 15:40"),
+    (CHALLENGER_JOB_ID, "D 轨挑战者（17:45）", "mon-fri 17:45"),
     (WATCHDOG_JOB_ID, "实时盘看门狗（每 5 分钟）", "every 5m"),
-    (FORWARD_HEALTH_JOB_ID, "前向风险闸门（周六 18:30）", "sat 18:30"),
     (CALIBRATE_JOB_ID, "成本模型一致性检查（周六 18:00）", "sat 18:00"),
     (WEEKLY_JOB_ID, "D 轨模型月度循环（周日 18:00）", "sun 18:00"),
 )
