@@ -195,7 +195,7 @@ export default function SettingsPage(): JSX.Element {
             <Form.Item
               name="quant_forward_enabled"
               label="前向期候选影子盘"
-              extra="每交易日 15:20 推进 atr_1p0_25_40 候选账本（隔离账本，配对比较，仅记录不自动切换）"
+              extra="每交易日 15:20 推进「当前跟踪的候选规则」账本（规则名与账本路径取自 FQA configs/forward_policy.yaml，隔离账本、配对比较，仅记录不自动切换）"
             >
               <Select options={ENABLED_OPTIONS} />
             </Form.Item>

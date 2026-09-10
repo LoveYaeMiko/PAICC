@@ -1,7 +1,7 @@
 """Tests for the forward-period panel feed (``/quant/forward``).
 
 Covers the business readers against a temporary FQA-root stub — the canonical
-``forward_health.json`` / ``paired_atr_1p0_25_40.json`` artifact wins over a
+``forward_health.json`` / ``paired_atr_1p0_25_35.json`` artifact wins over a
 newer shakedown copy (FQA labels those "not the forward window, pipeline
 shakedown only"), a corrupt candidate is skipped and listed instead of blanking
 the whole bundle, pre-registration records are listed newest-first, and the
@@ -54,7 +54,7 @@ def _health(verdict: str = "fail", failed: list[str] | None = None) -> dict:
 def _paired(verdict: str = "hold") -> dict:
     return {
         "paired": {
-            "rule_id": "atr_1p0_25_40", "n_days": 1, "ready": False, "window_days": 120,
+            "rule_id": "atr_1p0_25_35", "n_days": 1, "ready": False, "window_days": 120,
             "t_min": 1.5, "diff_gt": 0.0, "verdict": verdict, "switch": verdict == "switch",
             "corr": None, "mean_diff_pp": None, "t_stat": None,
             "candidate_params": {"pb_atr_mult": 1.0, "pb_stop_lo": 0.025, "pb_stop_hi": 0.04},
@@ -95,7 +95,7 @@ class ForwardReadersTest(unittest.TestCase):
 
     def test_bundle_reports_gate_and_candidate_verdicts(self):
         self._write("outputs/forward/forward_health.json", _health("fail"))
-        self._write("outputs/forward/paired_atr_1p0_25_40.json", _paired("hold"))
+        self._write("outputs/forward/paired_atr_1p0_25_35.json", _paired("hold"))
         bundle = qm.read_forward()
         self.assertEqual(bundle["gate_verdict"], "fail")
         self.assertEqual(bundle["candidate_verdict"], "hold")
@@ -137,7 +137,7 @@ class ForwardReadersTest(unittest.TestCase):
         self.assertEqual(qm.read_forward()["gate_verdict"], "fail")
 
     def test_paired_prefers_the_canonical_path(self):
-        canonical = self._write("outputs/forward/paired_atr_1p0_25_40.json", _paired("hold"))
+        canonical = self._write("outputs/forward/paired_atr_1p0_25_35.json", _paired("hold"))
         other = self._write("outputs/forward/paired_atr_0p5_20_40.json", _paired("switch"))
         os.utime(canonical, (time.time() - 600, time.time() - 600))
         os.utime(other, (time.time(), time.time()))

@@ -1288,10 +1288,13 @@ def read_forward_paired() -> dict[str, Any] | None:
     """Forward-candidate PAIRED comparison, canonical path first.
 
     Same canonical-first rule as :func:`read_forward_health`: the candidate job
-    writes ``outputs/forward/paired_atr_1p0_25_40.json``, and only a missing (or
-    unreadable) canonical file makes the reader fall back to the newest
-    ``paired_*.json`` — a stale artifact from a previous candidate must never
-    outrank the live one just because it was touched later.
+    writes ``outputs/forward/paired_<rule>.json`` for the tracked rule, and only a
+    missing (or unreadable) canonical file makes the reader fall back to the
+    newest ``paired_*.json`` — a stale artifact from a previous candidate must
+    never outrank the live one just because it was touched later.
+
+    The canonical name follows the TRACKED candidate, which changed on 2026-09-10
+    (``atr_1p0_25_40`` → ``atr_1p0_25_35``, see FQA docs/FORWARD_PROTOCOL.md §2).
 
     Record-only: the payload states the pre-registered switch rule and whether
     the candidate currently warrants a switch (``verdict`` = switch | hold).
@@ -1299,7 +1302,7 @@ def read_forward_paired() -> dict[str, Any] | None:
     hit = _newest_output(
         Path(_project_root()),
         "outputs/forward/paired_*.json",
-        canonical="outputs/forward/paired_atr_1p0_25_40.json",
+        canonical="outputs/forward/paired_atr_1p0_25_35.json",
     )
     if hit is None:
         return None

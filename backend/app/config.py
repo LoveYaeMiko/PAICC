@@ -65,8 +65,10 @@ DEFAULTS: dict[str, Any] = {
     # out-of-sample effect.
     "quant_d_cycle_enabled": "false",
     # Forward-period layer (docs/FORWARD_PROTOCOL.md in FQA):
-    #   quant_forward_enabled  — advance the atr_1p0_25_40 candidate shadow daily
-    #                            (isolated ledger, paired comparison, record only)
+    #   quant_forward_enabled  — advance the tracked forward candidate shadow daily
+    #                            (rule name + ledger path come from FQA
+    #                            configs/forward_policy.yaml; isolated ledger,
+    #                            paired comparison, record only)
     #   quant_forward_health_enabled — evaluate the risk gate at all; the switch
     #                            exists so the daily gate can be paused without
     #                            touching the candidate job (they accumulate

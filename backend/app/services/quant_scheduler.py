@@ -554,9 +554,13 @@ def run_weekly_cycle() -> dict[str, Any]:
 def run_forward_candidate_daily() -> dict[str, Any]:
     """Weekday 15:20 — advance the forward-period candidate shadow.
 
-    Isolated ledger (``outputs/forward/candidate_atr_1p0_25_40/``), same data /
-    code / execution regime as production, ONE difference (stop width), record
-    only — no auto-switch. See FQA ``docs/FORWARD_PROTOCOL.md`` §2.
+    Isolated ledger (path from FQA ``configs/forward_policy.yaml`` →
+    ``forward.candidates.<rule>.ledger``, currently
+    ``outputs/forward/candidate_atr_1p0_25_35/``), same data / code / execution
+    regime as production, ONE difference (stop width), record only — no
+    auto-switch. The tracked rule changed on 2026-09-10 (``atr_1p0_25_40`` →
+    ``atr_1p0_25_35``); the name is never hardcoded here, FQA's script reads it
+    from the config. See FQA ``docs/FORWARD_PROTOCOL.md`` §2.
     """
     try:
         if not settings.get_bool("quant_forward_enabled", True):
