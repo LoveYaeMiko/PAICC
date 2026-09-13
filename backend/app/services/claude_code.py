@@ -307,9 +307,16 @@ def _git_top_level(root: str) -> str | None:
             ["git", "-C", root, "rev-parse", "--show-toplevel"],
             capture_output=True,
             text=True,
+            # Same trap as the session spawner below: git emits UTF-8, the default
+            # text-mode encoding on Chinese Windows is GBK, and a multi-byte path
+            # (this repo's docs are full of Chinese) kills the reader thread — which
+            # leaves ``proc.stdout`` as None and the caller then dies on
+            # ``None.strip()``. Reported 2026-09-13 as a watcher error every 3 s.
+            encoding="utf-8",
+            errors="replace",
             timeout=10,
         )
-        if proc.returncode == 0:
+        if proc.returncode == 0 and proc.stdout:
             candidate = proc.stdout.strip()
             if candidate:
                 top = candidate
@@ -352,13 +359,15 @@ def _git_diff(top: str, rel: str, full: str, kind: str) -> str | None:
             ["git", "-C", top, "diff", "--", rel_top],
             capture_output=True,
             text=True,
+            encoding="utf-8",     # see _git_top_level: GBK + UTF-8 diff = dead reader
+            errors="replace",
             timeout=15,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
     if proc.returncode != 0:
         return None
-    out = proc.stdout
+    out = proc.stdout or ""      # None when the reader thread already died
     if not out.strip():
         return None
     return _truncate_diff(out)

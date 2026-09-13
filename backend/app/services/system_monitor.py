@@ -217,6 +217,11 @@ def _gpu_stats_nvidia_smi() -> list[dict[str, Any]]:
             ],
             capture_output=True,
             text=True,
+            # Locale output (Chinese Windows = GBK) is what we want here, but a
+            # stray UTF-8 byte would kill the reader thread and leave stdout as
+            # None — see claude_code._git_diff, which hit precisely that on
+            # 2026-09-13. ``errors="replace"`` cannot crash the decode.
+            errors="replace",
             timeout=4,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -395,6 +400,7 @@ def list_power_plans() -> list[dict[str, Any]]:
             ["powercfg", "/list"],
             capture_output=True,
             text=True,
+            errors="replace",   # Chinese plan names decode as locale; never crash
             timeout=8,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
@@ -433,13 +439,14 @@ def set_power_plan(name: str) -> dict[str, Any]:
             ["powercfg", "/setactive", guid],
             capture_output=True,
             text=True,
+            errors="replace",   # see set_power_plan's sibling: never crash the decode
             timeout=15,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
         return {"ok": False, "message": f"powercfg failed: {exc}"}
 
     if proc.returncode != 0:
-        detail = proc.stderr.strip() or proc.stdout.strip()
+        detail = (proc.stderr or "").strip() or (proc.stdout or "").strip()
         return {"ok": False, "message": detail or f"powercfg exited with code {proc.returncode}"}
 
     return {"ok": True, "message": f"Power plan set to {name}"}
