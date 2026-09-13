@@ -22,6 +22,14 @@ class PitAutostartTest(unittest.TestCase):
         self.addCleanup(self._restore)
 
     def _restore(self):
+        # a spawned worker must not outlive the test: it would call the REAL
+        # ensure_pit_db_up after the mocks are gone and race the next test's
+        # assertions (observed: an intermittent suite failure on 2026-09-13).
+        import threading
+
+        for t in threading.enumerate():
+            if t.name == "pit-autostart" and t.is_alive():
+                t.join(timeout=5)
         qm._pit_autostart_started = self._saved
 
     def _settings(self, enabled: bool):
@@ -50,7 +58,8 @@ class PitAutostartTest(unittest.TestCase):
             release.wait(5)
             return {"ok": True, "stage": "healthy", "detail": "x"}
 
-        with mock.patch.object(qm, "ensure_pit_db_up", _slow):
+        with mock.patch.object(qm, "ensure_pit_db_up", _slow), \
+             mock.patch.object(qm, "_PIT_AUTOSTART_RETRY_DELAY", 0):
             t0 = time.time()
             out = qm.ensure_pit_db_on_startup()
             elapsed = time.time() - t0
@@ -64,6 +73,7 @@ class PitAutostartTest(unittest.TestCase):
         with mock.patch.object(qm, "ensure_pit_db_up",
                                lambda: {"ok": False, "stage": "docker_daemon",
                                         "detail": "守护进程未就绪"}), \
+             mock.patch.object(qm, "_PIT_AUTOSTART_DEADLINE", 0), \
              mock.patch.object(qm.db, "log_operation") as log:
             qm._pit_autostart_worker()
 
@@ -72,12 +82,45 @@ class PitAutostartTest(unittest.TestCase):
         self.assertEqual(params["trigger"], "backend_startup")
         self.assertFalse(result["ok"])
         self.assertEqual(result["stage"], "docker_daemon")
+        self.assertEqual(result["attempts"], 1)
+
+    def test_worker_retries_until_healthy(self):
+        """One failed attempt must not end the boot hook (2026-09-13 flapping engine)."""
+        calls: list[int] = []
+        results = [{"ok": False, "stage": "health", "detail": "engine flapping"},
+                   {"ok": False, "stage": "health", "detail": "still flapping"},
+                   {"ok": True, "stage": "healthy", "detail": "PIT 数据库就绪"}]
+
+        def _up():
+            calls.append(1)
+            return results[min(len(calls) - 1, len(results) - 1)]
+
+        with mock.patch.object(qm, "ensure_pit_db_up", _up), \
+             mock.patch.object(qm, "_PIT_AUTOSTART_RETRY_DELAY", 0), \
+             mock.patch.object(qm.db, "log_operation") as log:
+            qm._pit_autostart_worker()
+
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(log.call_args.args[2]["ok"])
+        self.assertEqual(log.call_args.args[2]["attempts"], 3)
+
+    def test_worker_gives_up_at_the_deadline(self):
+        with mock.patch.object(qm, "ensure_pit_db_up",
+                               lambda: {"ok": False, "stage": "docker_daemon",
+                                        "detail": "no docker"}), \
+             mock.patch.object(qm, "_PIT_AUTOSTART_DEADLINE", 0), \
+             mock.patch.object(qm.db, "log_operation") as log:
+            qm._pit_autostart_worker()
+
+        self.assertFalse(log.call_args.args[2]["ok"])
+        self.assertEqual(log.call_args.args[2]["attempts"], 1)
 
     def test_worker_survives_an_exception(self):
         def _boom():
             raise RuntimeError("docker missing")
 
         with mock.patch.object(qm, "ensure_pit_db_up", _boom), \
+             mock.patch.object(qm, "_PIT_AUTOSTART_DEADLINE", 0), \
              mock.patch.object(qm.db, "log_operation") as log:
             qm._pit_autostart_worker()          # must not raise
 
@@ -94,12 +137,14 @@ class PitAutostartTest(unittest.TestCase):
 
     def test_second_call_is_a_noop(self):
         self._settings(True)
-        with mock.patch.object(qm, "ensure_pit_db_up",
-                               lambda: {"ok": True, "stage": "already_up", "detail": ""}):
+        # the worker body is patched out: this test is about the latch, and a real
+        # worker could outlive the mock and touch Docker/DB in the background
+        with mock.patch.object(qm, "_pit_autostart_worker") as worker:
             first = qm.ensure_pit_db_on_startup()
             second = qm.ensure_pit_db_on_startup()
         self.assertTrue(first["started"])
         self.assertFalse(second["started"])
+        worker.assert_called_once()
 
     def test_registered_as_a_background_service(self):
         """The hook is useless if nothing calls it at boot."""

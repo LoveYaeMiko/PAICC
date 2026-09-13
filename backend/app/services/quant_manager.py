@@ -819,7 +819,15 @@ _DOCKER_DAEMON_WAIT = 240
 _DOCKER_COMPOSE_TIMEOUT = 120
 _DOCKER_COMPOSE_RETRIES = 3
 _DOCKER_COMPOSE_RETRY_DELAY = 5
+#: Total time the compose stage may keep retrying (the daemon is re-checked before
+#: every attempt, so a flapping engine is waited out instead of burning the retries).
+_DOCKER_COMPOSE_DEADLINE = 180
 _PIT_HEALTH_WAIT = 120
+#: Boot-hook total budget: keep calling ensure_pit_db_up until the stack is up.
+#: 2026-09-13 measured a healthy cold start at ~17 s, so this is pure head-room for
+#: a machine that is still busy starting up.
+_PIT_AUTOSTART_DEADLINE = 900
+_PIT_AUTOSTART_RETRY_DELAY = 20
 
 
 def _run_docker(args: list[str], cwd: str | None = None, timeout: int = 60) -> subprocess.CompletedProcess | None:
@@ -910,8 +918,19 @@ def ensure_pit_db_up() -> dict[str, Any]:
 
     # 3. compose up, tolerating transient engine errors (image-inspect 500 while
     #    the engine warms up) and the restart policy already having done the work.
+    #    The daemon is RE-CHECKED before every attempt: a Docker Desktop that was
+    #    just launched can advertise then drop its pipe while the WSL VM boots
+    #    (observed 2026-09-13: the daemon reported up, compose then failed with
+    #    "dockerDesktopLinuxEngine ... cannot find the file specified", and the
+    #    single 3-attempt burst was spent before the engine was really there).
     compose_err = ""
-    for _ in range(_DOCKER_COMPOSE_RETRIES):
+    compose_deadline = time.time() + _DOCKER_COMPOSE_DEADLINE
+    attempt = 0
+    while time.time() < compose_deadline:
+        attempt += 1
+        if not _docker_daemon_up():
+            time.sleep(_DOCKER_COMPOSE_RETRY_DELAY)
+            continue
         proc = _run_docker(["compose", "up", "-d"], cwd=root, timeout=_DOCKER_COMPOSE_TIMEOUT)
         if proc is not None and proc.returncode == 0:
             compose_err = ""
@@ -927,7 +946,7 @@ def ensure_pit_db_up() -> dict[str, Any]:
     while not _pit_container_healthy() and time.time() < stage_deadline:
         time.sleep(3)
     if _pit_container_healthy():
-        return {"ok": True, "stage": "healthy", "detail": "PIT 数据库就绪"}
+        return {"ok": True, "stage": "healthy", "detail": f"PIT 数据库就绪（compose 尝试 {attempt} 次）"}
     detail = compose_err or f"{_PIT_CONTAINER} 未在 {_PIT_HEALTH_WAIT}s 内变为 healthy"
     return {"ok": False, "stage": "health", "detail": detail[-400:]}
 
@@ -937,23 +956,42 @@ _pit_autostart_started = False
 
 
 def _pit_autostart_worker() -> None:
-    """Bring the PIT stack up at boot and record the outcome (runs on a thread)."""
-    try:
-        result = ensure_pit_db_up()
-        db.log_operation("quant_pit_autostart", {"trigger": "backend_startup"}, result)
-        if result.get("ok"):
-            logger.info("PIT autostart: %s (%s)", result.get("detail"), result.get("stage"))
-        else:
-            logger.warning("PIT autostart failed at stage %s: %s",
-                           result.get("stage"), result.get("detail"))
-    except Exception as exc:  # noqa: BLE001 — boot must never fail on this
-        logger.exception("PIT autostart crashed")
+    """Bring the PIT stack up at boot and record the outcome (runs on a thread).
+
+    Retries until the stack is healthy or ``_PIT_AUTOSTART_DEADLINE`` elapses: at
+    boot the machine is often still busy (Docker Desktop itself just starting,
+    WSL VM cold), and a single attempt that gives up would put the operator back
+    in the 2026-09-11 situation — "the backend says ready, the data layer is not".
+    ``ensure_pit_db_up`` returns immediately when the container is already healthy,
+    so the loop costs nothing once the stack is up.
+    """
+    deadline = time.time() + _PIT_AUTOSTART_DEADLINE
+    attempts = 0
+    result: dict[str, Any] = {"ok": False, "stage": "not_attempted", "detail": ""}
+    while True:
+        attempts += 1
         try:
-            db.log_operation("quant_pit_autostart", {"trigger": "backend_startup"},
-                             {"ok": False, "stage": "exception",
-                              "detail": f"{type(exc).__name__}: {exc}"})
-        except Exception:  # noqa: BLE001
-            pass
+            result = ensure_pit_db_up()
+        except Exception as exc:  # noqa: BLE001 — boot must never fail on this
+            logger.exception("PIT autostart crashed")
+            result = {"ok": False, "stage": "exception",
+                      "detail": f"{type(exc).__name__}: {exc}"}
+        if result.get("ok") or time.time() >= deadline:
+            break
+        time.sleep(_PIT_AUTOSTART_RETRY_DELAY)
+
+    outcome = dict(result)
+    outcome["attempts"] = attempts
+    try:
+        db.log_operation("quant_pit_autostart", {"trigger": "backend_startup"}, outcome)
+    except Exception:  # noqa: BLE001
+        logger.exception("could not log the PIT autostart outcome")
+    if outcome.get("ok"):
+        logger.info("PIT autostart: %s (stage=%s, attempts=%d)",
+                    outcome.get("detail"), outcome.get("stage"), attempts)
+    else:
+        logger.warning("PIT autostart FAILED after %d attempt(s) at stage %s: %s",
+                       attempts, outcome.get("stage"), outcome.get("detail"))
 
 
 def ensure_pit_db_on_startup() -> dict[str, Any]:
