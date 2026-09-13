@@ -206,6 +206,13 @@ export default function SettingsPage(): JSX.Element {
             >
               <Select options={ENABLED_OPTIONS} />
             </Form.Item>
+            <Form.Item
+              name="quant_pit_autostart"
+              label="启动时自动拉起 Docker / PIT 库"
+              extra="后端启动即在后台线程拉起 Docker Desktop 与 fqa-pit-db（FQA 脚本依赖的数据层），不会阻塞面板启动；结果记入操作日志 quant_pit_autostart。自行管理 Docker 时可关闭"
+            >
+              <Select options={ENABLED_OPTIONS} />
+            </Form.Item>
           </FieldGrid>
 
           <SectionTitle>文件</SectionTitle>

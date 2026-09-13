@@ -932,6 +932,65 @@ def ensure_pit_db_up() -> dict[str, Any]:
     return {"ok": False, "stage": "health", "detail": detail[-400:]}
 
 
+#: Idempotence latch for the boot-time autostart (one thread per process).
+_pit_autostart_started = False
+
+
+def _pit_autostart_worker() -> None:
+    """Bring the PIT stack up at boot and record the outcome (runs on a thread)."""
+    try:
+        result = ensure_pit_db_up()
+        db.log_operation("quant_pit_autostart", {"trigger": "backend_startup"}, result)
+        if result.get("ok"):
+            logger.info("PIT autostart: %s (%s)", result.get("detail"), result.get("stage"))
+        else:
+            logger.warning("PIT autostart failed at stage %s: %s",
+                           result.get("stage"), result.get("detail"))
+    except Exception as exc:  # noqa: BLE001 — boot must never fail on this
+        logger.exception("PIT autostart crashed")
+        try:
+            db.log_operation("quant_pit_autostart", {"trigger": "backend_startup"},
+                             {"ok": False, "stage": "exception",
+                              "detail": f"{type(exc).__name__}: {exc}"})
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def ensure_pit_db_on_startup() -> dict[str, Any]:
+    """PAICC boot hook: start Docker / the PIT database WITHOUT blocking startup.
+
+    Why this exists (2026-09-11): Docker Desktop was not running when the machine
+    was switched on, so the pre-open live check failed on ``connection refused``
+    and the whole morning depended on someone noticing. The scheduled jobs already
+    self-heal (``_ensure_pit_db_or_fail`` before every run, and the 09:25 live job
+    retries until 09:56), but the panel was happily serving a "ready" backend whose
+    data layer was down — the failure only appeared at the first job.
+
+    So the backend brings the stack up itself as soon as it boots:
+
+    * the work runs on a **daemon thread** — ``ensure_pit_db_up`` can legitimately
+      spend minutes waiting for the Docker daemon, and the FastAPI lifespan must
+      not block on that (the GUI would hang on launch);
+    * the fast path inside ``ensure_pit_db_up`` returns immediately when the
+      container is already healthy, so a normal boot costs one ``docker inspect``;
+    * the result lands in ``operation_logs`` as ``quant_pit_autostart``, so
+      「Docker 是后端自己拉起来的」 is visible instead of silent;
+    * ``quant_pit_autostart=false`` disables it (an operator who manages Docker
+      themselves should not have the backend fight them).
+
+    Returns immediately; never raises.
+    """
+    global _pit_autostart_started
+    if not settings.get_bool("quant_pit_autostart", True):
+        return {"ok": True, "skipped": "quant_pit_autostart=false", "started": False}
+    if _pit_autostart_started:
+        return {"ok": True, "skipped": "已启动过", "started": False}
+    _pit_autostart_started = True
+    threading.Thread(target=_pit_autostart_worker, daemon=True,
+                     name="pit-autostart").start()
+    return {"ok": True, "started": True}
+
+
 class OutputCorruptError(Exception):
     """An FQA output JSON exists but cannot be parsed as a dict (corrupt/empty)."""
 

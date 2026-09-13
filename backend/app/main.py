@@ -37,9 +37,12 @@ ROUTER_MODULES = [
 ]
 
 #: (module, start_function) — background services, started idempotently at boot.
+#: ``ensure_pit_db_on_startup`` only KICKS OFF a daemon thread (Docker cold starts
+#: can take minutes), so it never delays the lifespan.
 BACKGROUND_SERVICES = [
     ("app.services.system_monitor", "start"),
     ("app.services.quant_manager", "start"),
+    ("app.services.quant_manager", "ensure_pit_db_on_startup"),
     ("app.services.quant_scheduler", "start_scheduler"),
     ("app.services.storage_analysis", "start_scheduler"),
     ("app.services.paper_service", "start_scheduler"),

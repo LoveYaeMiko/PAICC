@@ -81,6 +81,11 @@ DEFAULTS: dict[str, Any] = {
     "quant_forward_enabled": "true",
     "quant_forward_health_enabled": "true",
     "quant_forward_health_time": "15:40",
+    #   quant_pit_autostart    — on backend boot, start Docker Desktop / bring the
+    #                            FQA PIT container up on a daemon thread (the data
+    #                            layer the FQA scripts need). Set false if Docker is
+    #                            managed by hand and must not be started by PAICC.
+    "quant_pit_autostart": "true",
     # LLM
     "llm_provider": "deepseek",
     "llm_model": "deepseek-chat",
