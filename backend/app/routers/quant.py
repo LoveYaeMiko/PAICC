@@ -186,11 +186,23 @@ def live_status(account: str = "") -> dict[str, Any] | None:
 
     Written by ``cli.py live`` at every poll (only while trading hours);
     ``None`` before the first live run of the day.
+
+    The payload always carries a ``health`` block (2026-09-17): the status file
+    itself is missing on a day the trader died before its first poll, and the panel
+    used to show nothing at all for a completely missed session. ``health`` is
+    derived from the pid lock and the heartbeat file, so it is available either way.
     """
     try:
-        return quant_manager.read_live_status(account=account)
+        data = quant_manager.read_live_status(account=account)
+        health = quant_manager.live_health(account=account)
     except quant_manager.OutputCorruptError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if data is None:
+        return {"account": health.get("account"), "health": health}
+    data["health"] = health
+    return data
 
 
 @router.get("/preclose")

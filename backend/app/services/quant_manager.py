@@ -1313,6 +1313,138 @@ def read_live_status(account: str = "") -> dict[str, Any] | None:
 #: escape ``outputs/`` with ``../`` or an absolute path.
 _ACCOUNT_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
+#: The D-track decision windows (FQA ``docs/LIVE_READINESS.md`` A6). The lunch
+#: break is NOT downtime, so a single 09:30-15:00 span would under-report.
+_LIVE_WINDOWS: tuple[tuple[int, int, int, int], ...] = (
+    (9, 30, 11, 30),
+    (13, 0, 15, 0),
+)
+
+
+def _live_window_minutes(now: datetime) -> int:
+    """Decision-window minutes elapsed today (full 240 after the close)."""
+    total = 0
+    for start_h, start_m, end_h, end_m in _LIVE_WINDOWS:
+        start = now.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
+        end = now.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
+        if now <= start:
+            continue
+        total += int((min(now, end) - start).total_seconds() // 60)
+    return total
+
+
+def _live_in_session(now: datetime) -> bool:
+    minutes = now.hour * 60 + now.minute
+    return any(a * 60 + b <= minutes < c * 60 + d for a, b, c, d in _LIVE_WINDOWS)
+
+
+def live_health(account: str = "") -> dict[str, Any]:
+    """Is the real-time layer actually running TODAY?
+
+    ``read_live_status()`` returns the trader's own status file, which does not
+    exist on a day the trader died before its first poll — so the panel showed
+    nothing at all and a fully missed session looked like "no data yet". Reported
+    2026-09-17: Docker/PIT were down, the trader was launched at 09:25 and
+    relaunched four times, and the panel still said nothing while the session
+    produced ZERO heartbeats.
+
+    This block is derived from what the trader leaves behind, so it is available
+    even when the status file is absent:
+
+    * ``alive`` — pid lock + command line (``live_trader_alive``);
+    * ``last_heartbeat`` / ``heartbeat_age_min`` — the newest row of
+      ``outputs/live_<acct>.jsonl`` (written once per poll);
+    * ``ticks_today`` vs ``expected_ticks_today`` — one tick per minute inside the
+      two decision windows (240 for a full session);
+    * ``in_session`` — whether NOW is inside a decision window, i.e. whether the
+      trader is expected to be alive and ticking;
+    * ``pit_up`` — the FQA PIT container, the dependency whose absence kills
+      ``cli.py live`` on startup;
+    * ``status``/``reason`` — a one-word verdict for the panel: ``ok`` | ``down``
+      (in session, not alive) | ``late`` (alive or finished but today's coverage is
+      poor) | ``idle`` (nothing expected right now).
+    """
+    root = Path(_project_root())
+    name = _live_account_name(root, account)
+    if not _ACCOUNT_NAME_RE.match(name):
+        raise ValueError(f"invalid account name: {name!r}")
+
+    now = datetime.now()
+    in_session = _live_in_session(now)
+    heartbeat_file = root / "outputs" / f"live_{name}.jsonl"
+    last_ts: str | None = None
+    ticks_today = 0
+    today = now.strftime("%Y-%m-%d")
+    try:
+        with heartbeat_file.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                ts = str(row.get("ts") or "")
+                if not ts:
+                    continue
+                last_ts = ts
+                if ts.startswith(today) and _live_in_session(
+                    datetime.fromisoformat(f"{today}T{ts[11:19]}")
+                ):
+                    ticks_today += 1
+    except OSError:
+        pass
+
+    expected = _live_window_minutes(now)
+    coverage = round(ticks_today / expected, 4) if expected else None
+    pid_file = root / "outputs" / f"live_{name}.pid"
+    pid: int | None = None
+    try:
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        pid = None
+    alive = live_trader_alive()
+    try:
+        pit_up = _pit_container_healthy()
+    except Exception:  # noqa: BLE001 — docker missing must not break the panel
+        pit_up = False
+
+    age_min: float | None = None
+    if last_ts:
+        try:
+            age_min = round((now - datetime.fromisoformat(last_ts)).total_seconds() / 60.0, 1)
+        except ValueError:
+            age_min = None
+
+    if in_session and not alive:
+        status, reason = "down", (
+            f"盘中（{now:%H:%M}）实时进程未运行"
+            + ("；PIT 库不可用" if not pit_up else "")
+            + (f"；今日心跳 {ticks_today}/{expected}" if expected else "")
+        )
+    elif expected and ticks_today == 0 and not alive and now.hour >= 15:
+        status, reason = "late", f"今日无心跳（0/{expected}），实时层全天未运行"
+    elif expected and coverage is not None and coverage < 0.95 and (alive or now.hour >= 15):
+        status, reason = "late", f"今日心跳覆盖 {coverage:.0%}（{ticks_today}/{expected}）"
+    else:
+        status, reason = "ok", "实时层正常" if alive else "非交易时段或无待办"
+    return {
+        "account": name,
+        "alive": alive,
+        "pid": pid,
+        "in_session": in_session,
+        "last_heartbeat": last_ts,
+        "heartbeat_age_min": age_min,
+        "ticks_today": ticks_today,
+        "expected_ticks_today": expected,
+        "coverage_today": coverage,
+        "pit_up": pit_up,
+        "status": status,
+        "reason": reason,
+        "checked_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
 
 def _newest_output(
     root: Path, pattern: str, canonical: str | None = None

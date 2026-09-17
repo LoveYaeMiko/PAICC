@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Button, Card, Col, Empty, Row, Space, Spin, Statistic, Table, Tag, Typography } from 'antd'
+import { Alert, Button, Card, Col, Empty, Row, Space, Spin, Statistic, Table, Tag, Tooltip, Typography } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
 import type { TableColumnsType } from 'antd'
 import type { EChartsOption } from 'echarts'
@@ -36,6 +36,22 @@ interface LivePosition {
   quote_ts?: string | null
 }
 
+interface LiveHealth {
+  account?: string
+  alive?: boolean
+  pid?: number | null
+  in_session?: boolean
+  last_heartbeat?: string | null
+  heartbeat_age_min?: number | null
+  ticks_today?: number
+  expected_ticks_today?: number
+  coverage_today?: number | null
+  pit_up?: boolean
+  status?: 'ok' | 'down' | 'late' | 'idle'
+  reason?: string
+  checked_at?: string
+}
+
 interface LiveStatus {
   account?: string
   ts?: string
@@ -46,6 +62,8 @@ interface LiveStatus {
   /** per-symbol skip reasons from the current poll */
   blocked?: Record<string, string>
   decision_window?: string
+  /** did the real-time layer actually run today (present even with no status file) */
+  health?: LiveHealth
 }
 
 /** 14:50 pre-close order list (``outputs/preclose_orders_<account>.json``). */
@@ -94,6 +112,44 @@ const MODE_LABEL: Record<string, string> = { normal: '正常', de_risk: '收缩'
 
 /** Live payload is stale when it was not refreshed within the last 10 minutes. */
 const LIVE_STALE_MS = 10 * 60 * 1000
+
+/** Live-layer verdict → tag colour/text (2026-09-17: a missed session must be visible). */
+function healthTagColor(h?: LiveHealth): string {
+  switch (h?.status) {
+    case 'down':
+      return 'red'
+    case 'late':
+      return 'orange'
+    case 'ok':
+      return h.alive ? 'green' : 'default'
+    default:
+      return 'default'
+  }
+}
+
+function healthTagText(h?: LiveHealth): string {
+  switch (h?.status) {
+    case 'down':
+      return '实时进程未运行'
+    case 'late':
+      return `今日不完整 ${h.coverage_today != null ? `${Math.round(h.coverage_today * 100)}%` : ''}`.trim()
+    case 'ok':
+      return h.alive ? '运行中' : '已收盘/无待办'
+    default:
+      return '状态未知'
+  }
+}
+
+function healthTooltip(h?: LiveHealth): string {
+  if (!h) return '实时层健康数据不可用'
+  return [
+    `进程：${h.alive ? `运行中 (pid ${h.pid ?? '—'})` : '未运行'}`,
+    `今日心跳：${h.ticks_today ?? 0}/${h.expected_ticks_today ?? 0}`,
+    `最后一跳：${h.last_heartbeat ?? '—'}${h.heartbeat_age_min != null ? `（${h.heartbeat_age_min} 分钟前）` : ''}`,
+    `PIT 库：${h.pit_up ? '正常' : '不可用'}`,
+    `检查时间：${h.checked_at ?? '—'}`,
+  ].join(' · ')
+}
 
 function formatRatio(v: number | null | undefined): string {
   if (v == null) return '—'
@@ -630,14 +686,33 @@ export default function DTrackPanel({ refreshKey = 0 }: Props): JSX.Element {
           <Space size={8} wrap>
             <span>实时盘中</span>
             <Tag color={liveStale ? 'default' : 'processing'}>{liveStale ? '非实时（休市/离线）' : '实时'}</Tag>
+            <Tooltip title={healthTooltip(live?.health)}>
+              <Tag color={healthTagColor(live?.health)}>{healthTagText(live?.health)}</Tag>
+            </Tooltip>
             <Typography.Text type="secondary" style={{ fontSize: 11 }}>
               更新于 {live?.ts ?? '—'}
             </Typography.Text>
           </Space>
         }
       >
-        {live == null ? (
-          <Empty description="今日无实时数据（休市或实时交易未启动）" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+        {live?.health && live.health.status !== 'ok' ? (
+          <Alert
+            style={{ marginBottom: 12 }}
+            type={live.health.status === 'down' ? 'error' : 'warning'}
+            showIcon
+            message={live.health.status === 'down' ? '实时层未在运行' : '实时层今日不完整'}
+            description={
+              `${live.health.reason ?? ''} · 心跳 ${live.health.ticks_today ?? 0}/${live.health.expected_ticks_today ?? 0}` +
+              (live.health.last_heartbeat ? ` · 最后一跳 ${live.health.last_heartbeat}` : '') +
+              (live.health.pit_up === false ? ' · PIT 库不可用' : '')
+            }
+          />
+        ) : null}
+        {live == null || !live.ts ? (
+          <Empty
+            description={live?.health?.reason ?? '今日无实时数据（休市或实时交易未启动）'}
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+          />
         ) : (
           <Space direction="vertical" size={12} style={{ width: '100%' }}>
             <Row gutter={[12, 12]}>
