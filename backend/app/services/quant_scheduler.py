@@ -29,6 +29,7 @@ trading days.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import threading
 from datetime import datetime
@@ -200,6 +201,49 @@ def _parse_hhmm(value: Any, default: tuple[int, int]) -> tuple[int, int]:
     except Exception:  # noqa: BLE001
         pass
     return default
+
+
+#: Only ONE forward job may build a market slice at a time (2026-09-18).
+#: ``forward_candidate.py`` and ``forward_health.py`` each assemble a ~10 GB market
+#: slice, and they are separate cron entries ten minutes apart (15:20 / 15:40).
+#: Normally the gate finishes in a few minutes, but on 2026-09-18 it was still in
+#: its replay when the candidate started: the two builds plus the 15:45 daily loop
+#: thrashed the machine, the candidate died with a non-zero exit and the gate hung
+#: until the backend was restarted hours later (``returncode: null`` in the
+#: operation log) — a whole day of forward artifacts lost. The catch-up path has
+#: always run these jobs sequentially (``_forward_catchup_sequence``); the cron path
+#: did not. This lock gives the cron path the same guarantee.
+_FORWARD_BUILD_LOCK = threading.Lock()
+
+#: How long a heavy forward job waits for the other one before giving up. The
+#: work is idempotent and both jobs have a day-long misfire grace, so skipping is
+#: safe: the next tick (or the boot catch-up) runs it.
+_FORWARD_BUILD_WAIT = 1800
+
+
+def _serialized_forward_build(job_id: str):
+    """Decorator: serialize the market-building forward jobs (see the lock above)."""
+
+    def _decorate(fn):
+        @functools.wraps(fn)
+        def _wrapper():
+            if not _FORWARD_BUILD_LOCK.acquire(timeout=_FORWARD_BUILD_WAIT):
+                result = {
+                    "ok": False,
+                    "skipped": f"{job_id}: 另一前向任务仍在构建行情切片"
+                               f"（等待 {_FORWARD_BUILD_WAIT}s 未获得；本次跳过，misfire 宽限内会补跑）",
+                }
+                logger.warning("forward build lock busy — %s skipped", job_id)
+                db.log_operation(job_id, {}, result)
+                return result
+            try:
+                return fn()
+            finally:
+                _FORWARD_BUILD_LOCK.release()
+
+        return _wrapper
+
+    return _decorate
 
 
 def _stamp(result: dict[str, Any]) -> dict[str, Any]:
@@ -551,6 +595,7 @@ def run_weekly_cycle() -> dict[str, Any]:
     return result
 
 
+@_serialized_forward_build("quant_forward_candidate")
 def run_forward_candidate_daily() -> dict[str, Any]:
     """Weekday 15:20 — advance the forward-period candidate shadow.
 
@@ -620,6 +665,7 @@ def run_forward_sample() -> dict[str, Any]:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
+@_serialized_forward_build("quant_forward_health")
 def run_forward_health() -> dict[str, Any]:
     """Weekday 15:40 — evaluate the forward RISK gate (not a capability gate).
 
