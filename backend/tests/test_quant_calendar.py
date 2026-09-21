@@ -40,6 +40,16 @@ class TradingCalendarTest(unittest.TestCase):
 
 
 class LiveWatchdogTest(unittest.TestCase):
+    def setUp(self):
+        # the relaunch cooldown is process-global: a previous test that launched a
+        # trader must not turn this test's relaunch into a skip
+        self._saved = qs._live_last_launch_at
+        qs._live_last_launch_at = 0.0
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        qs._live_last_launch_at = self._saved
+
     def test_noop_outside_the_session(self):
         with mock.patch.object(qs, "is_trading_day", lambda now=None: True), \
              mock.patch.object(qs, "datetime") as fake_dt:

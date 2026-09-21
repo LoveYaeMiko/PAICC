@@ -1280,36 +1280,69 @@ def read_trade_records(account: str = "", limit: int = 200, date: str | None = N
         con.close()
 
 
+def live_trader_processes() -> list[int]:
+    """Pids of RUNNING live-trader processes, whether or not they hold the pid lock.
+
+    Why this is not the same question as :func:`live_trader_alive` (2026-09-21): FQA
+    writes ``outputs/live_<acct>.pid`` inside ``LiveTrader.run()``, i.e. AFTER the
+    market slice has been assembled — which takes minutes. During that window the pid
+    file does not exist yet, so "no pid file" means "still starting", not "not
+    running". The 5-minute watchdog could not tell the difference and relaunched the
+    trader every tick: on 2026-09-21 the 09:25 launch was joined by 09:31, 09:36:17
+    and 09:36:39 copies, four ~15 GB assemblies on one 31.6 GB machine (free memory
+    fell to 1.1 GB). The extra copies either die or exit on the pid check, and in the
+    meantime they starve the real session.
+
+    Scanning the process table answers the question the pid file cannot: is a launch
+    already in flight?
+    """
+    pids: list[int] = []
+    try:
+        import psutil
+    except ImportError:
+        return pids
+    for proc in psutil.process_iter(["pid", "cmdline"]):
+        try:
+            cmd = " ".join(proc.info.get("cmdline") or []).lower()
+            pid = int(proc.info["pid"])
+        except Exception:  # noqa: BLE001 — a process can die or be unreadable mid-scan
+            continue
+        if "cli.py" in cmd and " live" in cmd:
+            pids.append(pid)
+    return pids
+
+
 def live_trader_alive() -> bool:
     """True when the FQA real-time trader process is running (audit P-4).
 
     Reads ``outputs/live_<account>.pid`` and validates the command line — a
     recycled pid must not look like a live trader. Used by the scheduler's
     watchdog to relaunch a trader that died mid-session.
+
+    Also true when a live-trader process exists WITHOUT the pid file yet: that is a
+    launch in progress (see :func:`live_trader_processes`), and treating it as dead
+    is what produced the 2026-09-21 stampede of four simultaneous assemblies.
     """
     root = Path(_project_root())
     name = _live_account_name(root, "")
     pid_file = root / "outputs" / f"live_{name}.pid"
-    if not pid_file.is_file():
-        return False
-    try:
-        pid = int(pid_file.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        return False
-    try:
-        import psutil
-    except ImportError:
+    if pid_file.is_file():
         try:
-            os.kill(pid, 0)  # noqa: S101 — existence probe only
-            return True
-        except OSError:
-            return False
-    try:
-        proc = psutil.Process(pid)
-        cmd = " ".join(proc.cmdline()).lower()
-        return "cli.py" in cmd and "live" in cmd.split()
-    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-        return False
+            pid = int(pid_file.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            pid = 0
+        try:
+            import psutil
+        except ImportError:
+            return pid > 0
+        try:
+            proc = psutil.Process(pid)
+            cmd = " ".join(proc.cmdline()).lower()
+            if "cli.py" in cmd and "live" in cmd.split():
+                return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+    return bool(live_trader_processes())
 
 
 def read_live_status(account: str = "") -> dict[str, Any] | None:

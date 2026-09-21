@@ -32,6 +32,7 @@ import asyncio
 import functools
 import logging
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,12 @@ WATCHDOG_JOB_ID = "quant_live_watchdog"
 FORWARD_CANDIDATE_JOB_ID = "quant_forward_candidate"
 FORWARD_SAMPLE_JOB_ID = "quant_forward_sample"
 FORWARD_HEALTH_JOB_ID = "quant_forward_health"
+
+#: Minimum seconds between two live-trader LAUNCH attempts (2026-09-21). The pid
+#: lock FQA writes is only created after the multi-minute market assembly, so a
+#: watchdog tick during a launch used to spawn yet another trader.
+_LIVE_RELAUNCH_COOLDOWN = 420
+_live_last_launch_at: float = 0.0
 
 
 def is_trading_day(now: datetime | None = None) -> bool:
@@ -129,6 +136,8 @@ def start_live_trader() -> dict[str, Any]:
 
     last_err = ""
     attempts = 0
+    global _live_last_launch_at
+    _live_last_launch_at = time.time()      # arm the watchdog cooldown
     if not is_trading_day():
         return {"ok": True, "skipped": "not a trading day — live trader not started"}
     while True:
@@ -974,7 +983,14 @@ def live_watchdog() -> dict[str, Any]:
     restarted (audit P-4: the "watchdog" in quant_manager is a log-file tailer,
     not a process monitor). The check is forward-only: the relaunched trader
     reads current prints and never back-fills a missed bar.
+
+    Two guards against relaunching into a trader that is merely STARTING
+    (2026-09-21): ``quant_manager.live_trader_alive()`` now also sees a launch whose
+    pid file does not exist yet, and a cooldown suppresses a second attempt within
+    ``_LIVE_RELAUNCH_COOLDOWN``. Without them the watchdog launched three extra
+    copies on top of the scheduled 09:25 one — four ~15 GB assemblies at once.
     """
+    global _live_last_launch_at
     now = datetime.now()
     if not is_trading_day(now):
         return _stamp({"ok": True, "skipped": "not a trading day"})
@@ -983,9 +999,14 @@ def live_watchdog() -> dict[str, Any]:
         return _stamp({"ok": True, "skipped": f"outside session ({now:%H:%M})"})
     if quant_manager.live_trader_alive():
         return _stamp({"ok": True, "alive": True})
+    if _live_last_launch_at and (time.time() - _live_last_launch_at) < _LIVE_RELAUNCH_COOLDOWN:
+        waited = int(time.time() - _live_last_launch_at)
+        return _stamp({"ok": True, "alive": False,
+                       "skipped": f"上次启动尝试在 {waited}s 前（冷却 {_LIVE_RELAUNCH_COOLDOWN}s 内）"})
     logger.warning("live trader not alive at %s — relaunching", now.strftime("%H:%M:%S"))
     db.log_operation("quant_live_watchdog", {"date": now.strftime("%Y-%m-%d")},
                      {"alive": False, "action": "relaunch"})
+    _live_last_launch_at = time.time()
     result = start_live_trader()
     return _stamp({"ok": bool(result.get("ok")), "alive": False, "relaunch": result})
 
