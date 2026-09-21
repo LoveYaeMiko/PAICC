@@ -86,6 +86,14 @@ DEFAULTS: dict[str, Any] = {
     #                            layer the FQA scripts need). Set false if Docker is
     #                            managed by hand and must not be started by PAICC.
     "quant_pit_autostart": "true",
+    #   quant_live_start_time  — when the real-time trader is launched. 09:00, not
+    #                            09:25: the market slice takes ~8 minutes to assemble
+    #                            and the first heartbeat lands only after that, so a
+    #                            09:25 launch cannot tick before ~09:33 and even a
+    #                            perfect day caps at 237/240 = 98.75% — under the
+    #                            gate's 99% availability floor, which made that hard
+    #                            gate unreachable by construction (2026-09-21).
+    "quant_live_start_time": "09:00",
     # LLM
     "llm_provider": "deepseek",
     "llm_model": "deepseek-chat",

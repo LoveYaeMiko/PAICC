@@ -7,7 +7,7 @@ is wired in**; every report/email below describes simulated results.
 
 The in-process APScheduler drives:
 
-* weekday 09:25 — launch the real-time intraday trader (``cli.py live``);
+* weekday 09:00 — launch the real-time intraday trader (``cli.py live``);
 * weekday 14:40 — AlphaFeed depth snapshot;
 * weekday 14:50 — closing-auction order list (``cli.py preclose``);
 * weekday 15:02 — intraday feature rollup refresh;
@@ -120,7 +120,7 @@ def run_preclose_daily() -> dict[str, Any]:
 
 
 def start_live_trader() -> dict[str, Any]:
-    """Weekday 09:25 — launch the FQA real-time intraday trader (detached).
+    """Weekday 09:00 — launch the FQA real-time intraday trader (detached).
 
     ``python cli.py live`` polls the latest minute print and executes D-track
     stop breaches at the actual moment; its decision window ends at 15:00 (the
@@ -966,14 +966,31 @@ def _fire_missed_today_jobs() -> None:
     # only ever reads CURRENT prints, so a resume never trades a past timestamp.
     # The window mirrors the trader's own sessions — the 11:30-13:00 lunch break
     # is excluded (a 12:00 restart used to start a trader that just slept).
-    in_session = (9, 30) <= (now.hour, now.minute) < (11, 30) or (13, 0) <= (now.hour, now.minute) < (15, 0)
-    if is_trading_day(now) and in_session:
-        db.log_operation(
-            "quant_live_resume", {"date": now.strftime("%Y-%m-%d")}, {"launched": True}
-        )
-        threading.Thread(
-            target=start_live_trader, daemon=True, name="quant-live-resume"
-        ).start()
+    _live_resume(now)
+
+
+def _live_resume(now: datetime) -> bool:
+    """Resume the live trader after a mid-session backend restart.
+
+    Returns True when a launch was started. Skips (and says so in the operation
+    log) when a trader is already running: the new copy could not see the running
+    one until it had finished its own ~8-minute market assembly, because FQA writes
+    the pid lock inside ``LiveTrader.run()`` — so an unguarded resume bought a
+    second ~15 GB build and then exited (2026-09-21 09:47).
+    """
+    in_session = ((9, 30) <= (now.hour, now.minute) < (11, 30)
+                  or (13, 0) <= (now.hour, now.minute) < (15, 0))
+    if not (is_trading_day(now) and in_session):
+        return False
+    stamp = {"date": now.strftime("%Y-%m-%d")}
+    if quant_manager.live_trader_alive():
+        db.log_operation("quant_live_resume", stamp,
+                         {"launched": False, "skipped": "实时交易者已在运行"})
+        return False
+    db.log_operation("quant_live_resume", stamp, {"launched": True})
+    threading.Thread(target=start_live_trader, daemon=True,
+                     name="quant-live-resume").start()
+    return True
 
 
 def live_watchdog() -> dict[str, Any]:
@@ -1070,9 +1087,18 @@ def start_scheduler() -> None:
                 id=DEPTH_JOB_ID, replace_existing=True,
                 misfire_grace_time=3600, coalesce=True,
             )
+            # Launch BEFORE the open, not at 09:25 (2026-09-21): assembling the
+            # market slice takes ~8 minutes, and the trader writes its first
+            # heartbeat only after that. A 09:25 launch therefore cannot tick before
+            # ~09:33, which caps a perfect day at 237/240 = 98.75% — under the gate's
+            # 99% availability floor, i.e. the hard gate was unreachable by
+            # construction. Launching at 09:00 (configurable) finishes the assembly
+            # before 09:30; the trader is forward-only and simply idles until the
+            # session opens, so an early start cannot trade a past timestamp.
+            lh, lm = _parse_hhmm(settings.get("quant_live_start_time"), (9, 0))
             scheduler.add_job(
                 _recording(LIVE_JOB_ID, start_live_trader),
-                CronTrigger(day_of_week="mon-fri", hour=9, minute=25),
+                CronTrigger(day_of_week="mon-fri", hour=lh, minute=lm),
                 id=LIVE_JOB_ID, replace_existing=True,
                 misfire_grace_time=3600, coalesce=True,
             )
@@ -1172,7 +1198,7 @@ def start_scheduler() -> None:
 #: the weekday daily loop is *D-only* (autopilot/shadow over ``D_5W``) and the
 #: Saturday/Sunday jobs are the D-cycle cost audit / monthly model cycle.
 _JOB_SPECS: tuple[tuple[str, str, str], ...] = (
-    (LIVE_JOB_ID, "实时模拟盘（09:25 启动）", "mon-fri 09:25"),
+    (LIVE_JOB_ID, "实时模拟盘（09:00 启动）", "mon-fri 09:00"),
     (DEPTH_JOB_ID, "深度快照采集（14:40）", "mon-fri 14:40"),
     (PRECLOSE_JOB_ID, "收盘竞价委托（14:50）", "mon-fri 14:50"),
     (INTRA_JOB_ID, "盘中特征刷新（15:02）", "mon-fri 15:02"),

@@ -22,7 +22,7 @@ from app.services import quant_scheduler as qs
 
 #: id -> planned cron label (the static table's plan times), in catalog order.
 EXPECTED_CRON = {
-    "quant_live_start": "mon-fri 09:25",
+    "quant_live_start": "mon-fri 09:00",
     "quant_depth_snapshot": "mon-fri 14:40",  # moved off 14:50 to clear preclose
     "quant_preclose": "mon-fri 14:50",
     "quant_intraday_refresh": "mon-fri 15:02",
@@ -165,10 +165,10 @@ class StatusWithLiveSchedulerTest(unittest.TestCase):
         jobs = [
             _FakeJob(
                 "quant_live_start",
-                CronTrigger(day_of_week="mon-fri", hour=9, minute=25),
-                datetime(2026, 9, 9, 9, 25),
+                CronTrigger(day_of_week="mon-fri", hour=9, minute=0),
+                datetime(2026, 9, 9, 9, 0),
             ),
-            # Deliberately different from the static label (09:25) to prove the
+            # Deliberately different from the static label (09:00) to prove the
             # live trigger wins.
             _FakeJob(
                 "quant_shadow_daily",
@@ -183,8 +183,8 @@ class StatusWithLiveSchedulerTest(unittest.TestCase):
         self.assertTrue(status["scheduler_running"])
         by_id = {job["id"]: job for job in status["jobs"]}
         self.assertEqual(len(status["jobs"]), 12)
-        self.assertEqual(by_id["quant_live_start"]["cron"], "mon-fri 09:25")
-        self.assertEqual(by_id["quant_live_start"]["next_run"], "2026-09-09T09:25:00")
+        self.assertEqual(by_id["quant_live_start"]["cron"], "mon-fri 09:00")
+        self.assertEqual(by_id["quant_live_start"]["next_run"], "2026-09-09T09:00:00")
         self.assertEqual(by_id["quant_shadow_daily"]["cron"], "mon-fri 16:05")
         self.assertEqual(by_id["quant_shadow_daily"]["next_run"], "2026-09-09T16:05:00")
         # Jobs the scheduler does not report keep their static plan time.
