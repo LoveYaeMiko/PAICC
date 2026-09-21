@@ -138,7 +138,13 @@ def start_live_trader() -> dict[str, Any]:
             if pit_fail is not None:
                 last_err = str(pit_fail.get("stderr", ""))[-200:]
             else:
-                proc = quant_manager.run_command(command="python cli.py live")
+                # Keep the trader's own output: on 2026-09-17 it was launched five
+                # times and died five times without leaving a single line behind
+                # (stdout/stderr went to DEVNULL), so nothing could explain why the
+                # session never started. The file is also what ``live_health`` reads
+                # back for the panel.
+                proc = quant_manager.run_command(command="python cli.py live",
+                                                 log_name="live_D_5W.log")
                 db.log_operation("quant_live_start", {}, {"pid": proc.get("pid")})
                 return {"ok": True, "pid": proc.get("pid")}
         except Exception as exc:  # noqa: BLE001

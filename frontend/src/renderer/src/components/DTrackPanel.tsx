@@ -47,6 +47,9 @@ interface LiveHealth {
   expected_ticks_today?: number
   coverage_today?: number | null
   pit_up?: boolean
+  /** the trader's own log (its last lines are the only record of a failed launch) */
+  log_path?: string
+  log_tail?: string[]
   status?: 'ok' | 'down' | 'late' | 'idle'
   reason?: string
   checked_at?: string
@@ -702,9 +705,24 @@ export default function DTrackPanel({ refreshKey = 0 }: Props): JSX.Element {
             showIcon
             message={live.health.status === 'down' ? '实时层未在运行' : '实时层今日不完整'}
             description={
-              `${live.health.reason ?? ''} · 心跳 ${live.health.ticks_today ?? 0}/${live.health.expected_ticks_today ?? 0}` +
-              (live.health.last_heartbeat ? ` · 最后一跳 ${live.health.last_heartbeat}` : '') +
-              (live.health.pit_up === false ? ' · PIT 库不可用' : '')
+              <div>
+                <div>
+                  {`${live.health.reason ?? ''} · 心跳 ${live.health.ticks_today ?? 0}/${live.health.expected_ticks_today ?? 0}`}
+                  {live.health.last_heartbeat ? ` · 最后一跳 ${live.health.last_heartbeat}` : ''}
+                  {live.health.pit_up === false ? ' · PIT 库不可用' : ''}
+                </div>
+                {live.health.log_tail?.length ? (
+                  <pre
+                    style={{
+                      margin: '8px 0 0',
+                      maxHeight: 120,
+                      overflow: 'auto',
+                      fontSize: 11,
+                      lineHeight: 1.4,
+                    }}
+                  >{`${live.health.log_path ?? ''}\n${live.health.log_tail.join('\n')}`}</pre>
+                ) : null}
+              </div>
             }
           />
         ) : null}

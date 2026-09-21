@@ -559,24 +559,45 @@ def run_command(
     command_id: int | None = None,
     command: str | None = None,
     confirmation_id: str | None = None,
+    log_name: str | None = None,
 ) -> dict[str, Any]:
     """Resolve a command (by id or literal string) and spawn it in the project root.
 
     Confirmation gating is performed by the caller (router / tool dispatcher); this
     function simply executes the resolved command.
+
+    ``log_name`` (2026-09-18) redirects the child's stdout+stderr to
+    ``<project root>/outputs/<log_name>`` instead of ``DEVNULL``. The live trader is
+    launched as a detached long-running process, and with DEVNULL **every reason it
+    might refuse to start was discarded**: on 2026-09-17 the trader was launched five
+    times, produced zero heartbeats, and left no explanation anywhere. A FILE (not a
+    pipe) is used on purpose: nobody reads it while the process lives, so a pipe
+    would eventually block the child on a full buffer.
     """
     cmd, root, project_id = _resolve_command(command_id, command)
+    out_handle = None
+    if log_name:
+        log_dir = Path(root) / "outputs"
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            out_handle = (log_dir / log_name).open("ab")
+        except OSError:
+            logger.warning("cannot open %s for %s — falling back to DEVNULL", log_name, cmd)
+            out_handle = None
     try:
         proc = subprocess.Popen(
             cmd,
             shell=True,
             cwd=root,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=out_handle or subprocess.DEVNULL,
+            stderr=subprocess.STDOUT if out_handle else subprocess.DEVNULL,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("failed to spawn command")
         raise RuntimeError(f"failed to run command: {exc}") from exc
+    finally:
+        if out_handle is not None:
+            out_handle.close()      # the child keeps its own duplicate handle
 
     with _tracked_lock:
         _tracked[proc.pid] = {"pid": proc.pid, "project_id": project_id, "command": cmd, "root": root}
@@ -584,10 +605,11 @@ def run_command(
     publish("log_line", {"file": "command", "line": cmd, "level": "info"})
     db.log_operation(
         "quant_run_command",
-        {"command_id": command_id, "command": cmd, "cwd": root},
+        {"command_id": command_id, "command": cmd, "cwd": root,
+         **({"log": log_name} if log_name else {})},
         {"pid": proc.pid},
     )
-    return {"pid": proc.pid, "command": cmd}
+    return {"pid": proc.pid, "command": cmd, "log": log_name}
 
 
 def _resolve_command(command_id: int | None, command: str | None) -> tuple[str, str, int | None]:
@@ -1417,6 +1439,17 @@ def live_health(account: str = "") -> dict[str, Any]:
         except ValueError:
             age_min = None
 
+    # The trader's own output (see run_command's log_name): its last lines are the
+    # only place the reason for a failed launch is written down.
+    log_path = root / "outputs" / f"live_{name}.log"
+    log_tail: list[str] = []
+    try:
+        if log_path.is_file():
+            with log_path.open("r", encoding="utf-8", errors="replace") as fh:
+                log_tail = [ln.rstrip() for ln in fh if ln.strip()][-8:]
+    except OSError:
+        pass
+
     if in_session and not alive:
         status, reason = "down", (
             f"盘中（{now:%H:%M}）实时进程未运行"
@@ -1440,6 +1473,8 @@ def live_health(account: str = "") -> dict[str, Any]:
         "expected_ticks_today": expected,
         "coverage_today": coverage,
         "pit_up": pit_up,
+        "log_path": f"outputs/live_{name}.log",
+        "log_tail": log_tail,
         "status": status,
         "reason": reason,
         "checked_at": now.strftime("%Y-%m-%d %H:%M:%S"),
